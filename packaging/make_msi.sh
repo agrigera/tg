@@ -20,12 +20,6 @@ then
 	exit 1
 fi
 
-if ! command -v php >/dev/null 2>&1
-then
-	echo "Error: php not found in PATH; required by packaging/make_wxs.sh to generate UUIDs."
-	exit 1
-fi
-
 if ! command -v uuidgen >/dev/null 2>&1
 then
 	echo "Error: uuidgen not found in PATH; required by packaging/make_wxs.sh."
@@ -41,14 +35,14 @@ VERSION=`cat version`
 
 "$ABSDIR/make_wxs.sh"
 
+./configure
+make
+
 rm -rf "$TARGET"
 mkdir -p "$TARGET"
 
+cp "$ABSDIR/../tg-timer.exe" "$TARGET/tg.exe"
 cd "$TARGET"
-../configure
-make
-
-mv "$TARGET/tg-timer.exe" "$TARGET/tg.exe"
 cp "$ABSDIR/tg-timer.wxs" "$TARGET"
 cp "$ABSDIR/LICENSE.rtf" "$TARGET"
 cp "$ABSDIR/../README.md" "$TARGET"

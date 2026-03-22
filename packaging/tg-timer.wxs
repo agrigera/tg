@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='windows-1252'?>
 <Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
-  <Product Name='Tg' Id='0a898d92-20ab-4190-ac94-e34703f4b47e' UpgradeCode='088fdac7-fc91-4881-a2db-eed04425a207'
+  <Product Name='Tg' Id='6bf7bc63-3dfe-4a40-bcbc-7bc6f9702615' UpgradeCode='088fdac7-fc91-4881-a2db-eed04425a207'
     Language='1033' Codepage='1252' Version='0.8.0' Manufacturer='Marcello Mamino'>
 
     <Package Id='*' Keywords='Installer'
@@ -17,7 +17,7 @@
       <Directory Id='ProgramFilesFolder' Name='PFiles'>
         <Directory Id='INSTALLDIR' Name='tg-timer'>
 
-          <Component Id='MainExecutable' Guid='21c636d3-3c08-4151-8dc7-626afb13fa4d'>
+          <Component Id='MainExecutable' Guid='9572b2c4-22f4-455e-87a3-702776d7ebff'>
             <File Id='TgEXE' Name='tg.exe' DiskId='1' Source='tg.exe' KeyPath='yes'>
               <Shortcut Id='startmenuTg' Directory='ProgramMenuDir' Name='Tg 0.8.0' WorkingDirectory='INSTALLDIR' Icon='tg.exe' IconIndex='0' Advertise='yes' />
               <Shortcut Id='desktopTg' Directory='DesktopFolder' Name='Tg 0.8.0' WorkingDirectory='INSTALLDIR' Icon='tg.exe' IconIndex='0' Advertise='yes' />
@@ -30,11 +30,11 @@
             </ProgId>
           </Component>
 
-          <Component Id='License' Guid='171e896c-dc9c-4b91-a6fe-f0f4093603fe'>
+          <Component Id='License' Guid='21486bd3-0c7d-4963-b661-784ba0692b4a'>
             <File Id='License' Name='LICENSE' DiskId='1' Source='LICENSE' KeyPath='yes' />
           </Component>
 
-          <Component Id='Readme' Guid='19f4a389-7907-4bd1-8aeb-96daaf157e40'>
+          <Component Id='Readme' Guid='893acf0a-4b21-4925-a2ca-bdd78b97ec1f'>
             <File Id='Readme' Name='README.md' DiskId='1' Source='README.md' KeyPath='yes' />
           </Component>
 
@@ -43,7 +43,7 @@
 
       <Directory Id='ProgramMenuFolder' Name='Programs'>
         <Directory Id='ProgramMenuDir' Name='Tg 0.8.0'>
-          <Component Id='ProgramMenuDir' Guid='f6c27708-4cbe-458c-b4c0-d3a37bfeebb0'>
+          <Component Id='ProgramMenuDir' Guid='bcacf5b5-8ff8-4b40-b73d-6bb2b443194e'>
             <RemoveFolder Id='ProgramMenuDir' On='uninstall' />
             <RegistryValue Root='HKCU' Key='Software\[Manufacturer]\[ProductName]' Type='string' Value='' KeyPath='yes' />
           </Component>
