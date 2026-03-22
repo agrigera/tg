@@ -140,6 +140,35 @@ UX notes implemented in this repository state:
 - the `audio` list marks the system default device with `(default)`
 - the `rate` list shows human-readable labels (`22.05 kHz`, `44.1 kHz`, etc.)
 
+## Build A Windows MSI Installer
+
+The repository already includes a WiX-based MSI pipeline in `packaging/`.
+
+### Prerequisites
+
+- WiX Toolset v3 commands available in PATH: `heat`, `candle`, `light`
+- `php` and `uuidgen` available in the same shell (used to generate `packaging/tg-timer.wxs` from template)
+- MSYS2/MinGW64 build toolchain already working (`./configure` + `make`)
+- a `resources` directory with runtime files to be bundled in the installer (for example GTK/PortAudio/FFTW runtime DLLs and related resources)
+
+### Command
+
+From the repository root in an MSYS2 shell:
+
+```sh
+./packaging/make_msi.sh /path/to/resources
+```
+
+This now performs the full flow:
+
+1. regenerates `packaging/tg-timer.wxs` from the template
+2. builds `tg-timer.exe`
+3. stages installer payload into `msi/`
+4. compiles and links WiX sources
+5. writes `msi/tg-timer_<version>.msi`
+
+If a required tool is missing, the script exits early with a specific error message.
+
 ## What Not To Do Yet
 
 Do not start with these tasks before the Windows build is working:
