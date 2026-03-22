@@ -57,7 +57,8 @@
 #define PAPERSTRIP_ZOOM_CAL 100
 #define PAPERSTRIP_MARGIN .2
 
-#define MIN_BPH 12000
+#define MIN_BPH 8100
+#define TYP_BPH 12000
 #define MAX_BPH 72000
 #define DEFAULT_BPH 21600
 #define MIN_LA 10 // deg
@@ -65,6 +66,7 @@
 #define DEFAULT_LA 52 // deg
 #define MIN_CAL -1000 // 0.1 s/d
 #define MAX_CAL 1000 // 0.1 s/d
+#define AUDIO_DEVICE_DEFAULT -1
 
 #define PRESET_BPH { 12000, 14400, 17280, 18000, 19800, 21600, 25200, 28800, 36000, 43200, 72000, 0 };
 
@@ -91,6 +93,8 @@ struct processing_buffers {
 	int ready;
 	uint64_t timestamp, last_tic, last_toc, events_from;
 	uint64_t *events;
+	unsigned char *events_tictoc;
+	float amp_history;
 #ifdef DEBUG
 	int debug_size;
 	float *debug;
@@ -127,6 +131,12 @@ struct processing_data {
 
 int start_portaudio(int *nominal_sample_rate, double *real_sample_rate);
 int terminate_portaudio();
+int list_audio_input_devices(int **devices, char ***names, int *count, int *default_device);
+void free_audio_input_devices(int *devices, char **names, int count);
+void set_audio_input_device(int device);
+int get_audio_input_device(void);
+void set_audio_sample_rate(int sample_rate);
+int get_audio_sample_rate(void);
 uint64_t get_timestamp(int light);
 int analyze_pa_data(struct processing_data *pd, int bph, double la, uint64_t events_from);
 int analyze_pa_data_cal(struct processing_data *pd, struct calibration_data *cd);
@@ -147,8 +157,15 @@ struct snapshot {
 
 	int events_count;
 	uint64_t *events; // used in cal+timegrapher mode
+	unsigned char *events_tictoc;	//< Tic or Toc for each event
 	int events_wp; // used in cal+timegrapher mode
 	uint64_t events_from; // used only in timegrapher mode
+
+	/** Allocated arrays of amplitude measurements and timestamps */
+	float *amps;		//< Circ buffer with history of amplitude measurements
+	uint64_t *amps_time;	//< Timestamps for amps
+	int amps_wp;		//< Index of recent amp in amps
+	int amps_count;		//< Number of amplitude samples
 
 	int signal;
 
@@ -164,6 +181,7 @@ struct snapshot {
 	double amp;
 
 	double trace_centering;
+	double trace_zoom;
 };
 
 struct computer {
@@ -225,6 +243,8 @@ struct main_window {
 
 	GtkWidget *window;
 	GtkWidget *bph_combo_box;
+	GtkWidget *audio_combo_box;
+	GtkWidget *sample_rate_combo_box;
 	GtkWidget *la_spin_button;
 	GtkWidget *cal_spin_button;
 	GtkWidget *snapshot_button;
@@ -246,9 +266,11 @@ struct main_window {
 	int controls_active;
 	int calibrate;
 	int bph;
+	int audio_device;
 	double la; // deg
 	int cal; // 0.1 s/d
 	int nominal_sr;
+	int restart_audio;
 
 	GKeyFile *config_file;
 	gchar *config_file_name;
@@ -272,7 +294,9 @@ void error(char *format,...);
 	OP(bph, bph, int) \
 	OP(lift_angle, la, double) \
 	OP(calibration, cal, int) \
-	OP(light_algorithm, is_light, int)
+	OP(light_algorithm, is_light, int) \
+	OP(audio_device, audio_device, int) \
+	OP(audio_rate, nominal_sr, int)
 
 struct conf_data {
 #define DEF(NAME,PLACE,TYPE) TYPE PLACE;

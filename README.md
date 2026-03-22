@@ -1,58 +1,58 @@
-# A program for timing mechanical watches [![Build Status](https://travis-ci.org/vacaboja/tg.svg?branch=master)](https://travis-ci.org/vacaboja/tg)
+# Tg
 
-The program tg is distributed under the GNU GPL license version 2. The full
-source code of tg is available at
-[https://github.com/vacaboja/tg](https://github.com/vacaboja/tg) and its
-copyright belongs to the respective contributors.
+Tg is a desktop timegrapher for mechanical watches. It listens to the ticking sound through the machine's audio input and estimates values such as rate, beat error, amplitude, and beat frequency.
 
-Tg is in development, and there is still no manual. Some info can be found
-in this
-[thread at WUS](http://forums.watchuseek.com/f6/open-source-timing-software-2542874.html),
-in particular the calibration procedure is described at
-[this post](http://forums.watchuseek.com/f6/open-source-timing-software-2542874-post29970370.html).
+## What You Need
 
-## Install instructions
+- a working microphone or audio input device
+- a quiet enough environment to capture the watch clearly
+- the correct BPH and lift angle if you want the most reliable readings
+- calibration, or at least a known-good setup, if you care about accuracy in seconds per day
 
-Tg is known to work under Microsoft Windows, OS X, and Linux. Moreover it
-should be possible to compile the source code under most modern UNIX-like
-systems. See the sub-sections below for the details.
+If you want practical setup advice instead of just build instructions, start here:
 
-### Windows
+- [docs/project-overview.md](docs/project-overview.md)
+- [docs/microphone-and-calibration-guide.md](docs/microphone-and-calibration-guide.md)
+- [docs/windows-vscode-development.md](docs/windows-vscode-development.md)
 
-Binaries can be found at https://tg.ciovil.li
+Recent builds include top bar `audio` and `rate` controls (input device and sample rate). See the microphone guide for practical usage and troubleshooting.
 
-### Macintosh
+## Supported Platforms
 
-A formula for the Homebrew package manager has been prepared by GitHub
-user [dmnc](https://github.com/dmnc). To use it, you need to install
-Homebrew first (instructions on http://brew.sh).
+The project documentation and packaging history indicate support for:
 
-Then run the following command to check everything is set up correctly
-and follow any instructions it gives you.
+- Windows
+- macOS
+- Linux
 
-	brew doctor
+The codebase is a native GTK application and should also be portable to other Unix-like systems with the required dependencies.
 
-To install tg, run
+## Dependencies
 
-	brew install dmnc/horology/tg
-	
-You can now launch tg by typing
+Build and runtime depend on:
 
-	tg-timer &
+- GTK+ 3
+- GLib 2.0
+- PortAudio 2.0
+- FFTW3 single-precision (`fftw3f`)
+- pthread
+- libm
 
-### Debian or Debian-based (e.g. Mint, Ubuntu)
+Build tooling depends on:
 
-Binary .deb packages can be downloaded from https://tg.ciovil.li
+- a C99-capable compiler
+- `autoconf`
+- `automake`
+- `libtool`
+- `make`
+- `pkg-config`
 
-## Compiling from sources
+## Build From Source
 
-The source code of tg can probably be built by any C99 compiler, however
-only gcc and clang have been tested. You need the following libraries:
-gtk+3, portaudio2, fftw3 (all available as open-source).
+Generic release build:
 
-Release build:
 ```sh
-git clone https://github.com/vacaboja/tg.git
+git clone https://github.com/agrigera/tg.git
 cd tg
 ./autogen.sh
 ./configure
@@ -60,50 +60,82 @@ make
 ```
 
 Debug build:
+
 ```sh
 make tg-timer-dbg
 ```
 
-### Compiling on Windows
+## Platform Notes
 
-It is suggested to use the msys2 platform. First install msys2 according
-to the instructions at [http://www.msys2.org](http://www.msys2.org). Then
-issue the following commands.
+### Windows
+
+The historical build path is MSYS2 with MinGW-w64.
+
+For the intended developer workflow inside VS Code on Windows, see [docs/windows-vscode-development.md](docs/windows-vscode-development.md).
+
+Typical package set:
 
 ```sh
 pacman -S mingw-w64-x86_64-gcc make pkg-config mingw-w64-x86_64-gtk3 mingw-w64-x86_64-portaudio mingw-w64-x86_64-fftw git autoconf automake libtool
-git clone https://github.com/vacaboja/tg.git
-cd tg
-./autogen.sh
-./configure
-make
 ```
 
-### Compiling on Debian
+Then build with the generic steps above.
 
-To compile tg on Debian
+### Debian and Ubuntu
 
 ```sh
 sudo apt-get install libgtk-3-dev libjack-jackd2-dev portaudio19-dev libfftw3-dev git autoconf automake libtool
-git clone https://github.com/vacaboja/tg.git
+git clone https://github.com/agrigera/tg.git
 cd tg
 ./autogen.sh
 ./configure
 make
 ```
 
-The package libjack-jackd2-dev is not necessary, it only works around a
-known bug (https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=718221).
+`libjack-jackd2-dev` is included in the original instructions as a workaround for an old Debian bug.
 
-### Compiling on Fedora
-
-To compile tg on Fedora
+### Fedora
 
 ```sh
 sudo dnf install fftw-devel portaudio-devel gtk3-devel autoconf automake libtool
-git clone https://github.com/vacaboja/tg.git
+git clone https://github.com/agrigera/tg.git
 cd tg
 ./autogen.sh
 ./configure
 make
 ```
+
+### macOS
+
+This repository does not currently provide a verified, maintained macOS installation path in-tree.
+
+If you work on macOS, expect to verify your GTK, PortAudio, and microphone permission setup manually.
+
+## Before You Trust The Numbers
+
+Check these first:
+
+1. The microphone is actually capturing the watch clearly.
+2. The watch is positioned very close to the microphone.
+3. The room is quiet enough for stable measurements.
+4. The selected BPH is correct, or the guessed value is plausible.
+5. The lift angle is correct if amplitude matters.
+6. Calibration has been performed or at least checked for repeatability.
+
+## Project Status
+
+The software is useful and still worth maintaining, but the repository has some stale metadata and documentation that are being cleaned up.
+
+Known maintenance realities today:
+
+- external discussions about Tg are generally positive about the tool itself
+- users repeatedly ask for better microphone and calibration guidance
+- packaging and maintenance visibility are spread across multiple forks and downstream packages
+
+Repository-tracked review notes live under [docs/issues](docs/issues).
+
+Recent implementation progress is tracked in [docs/issues/backport-progress-2026-03-22.md](docs/issues/backport-progress-2026-03-22.md).
+
+## License
+
+Tg is distributed under the GNU GPL version 2. See [LICENSE](LICENSE).

@@ -22,10 +22,15 @@ struct filter {
 	double a0,a1,a2,b1,b2;
 };
 
-static int int_cmp(const void *a, const void *b)
+struct detected_event {
+	int pos;
+	unsigned char tictoc;
+};
+
+static int detected_event_cmp(const void *a, const void *b)
 {
-	int x = *(int*)a;
-	int y = *(int*)b;
+	int x = ((const struct detected_event *)a)->pos;
+	int y = ((const struct detected_event *)b)->pos;
 	return x<y ? -1 : x>y ? 1 : 0;
 }
 
@@ -89,6 +94,7 @@ void setup_buffers(struct processing_buffers *b)
 	b->lpf = malloc(sizeof(struct filter));
 	make_lp(b->lpf,(double)FILTER_CUTOFF/b->sample_rate);
 	b->events = malloc(EVENTS_MAX * sizeof(uint64_t));
+	b->events_tictoc = malloc(EVENTS_MAX * sizeof(unsigned char));
 	b->ready = 0;
 #ifdef DEBUG
 	b->debug_size = b->sample_count;
@@ -119,6 +125,7 @@ void pb_destroy(struct processing_buffers *b)
 	free(b->hpf);
 	free(b->lpf);
 	free(b->events);
+	free(b->events_tictoc);
 #ifdef DEBUG
 	fftwf_free(b->debug);
 #endif
@@ -135,6 +142,11 @@ struct processing_buffers *pb_clone(struct processing_buffers *p)
 		memcpy(new->events, p->events, EVENTS_MAX * sizeof(uint64_t));
 	} else
 		new->events = NULL;
+	if(p->events_tictoc) {
+		new->events_tictoc = malloc(EVENTS_MAX * sizeof(unsigned char));
+		memcpy(new->events_tictoc, p->events_tictoc, EVENTS_MAX * sizeof(unsigned char));
+	} else
+		new->events_tictoc = NULL;
 
 #ifdef DEBUG
 	new->debug_size = p->debug_size;
@@ -164,6 +176,7 @@ void pb_destroy_clone(struct processing_buffers *p)
 {
 	free(p->waveform);
 	free(p->events);
+	free(p->events_tictoc);
 #ifdef DEBUG
 	free(p->debug);
 #endif
@@ -680,7 +693,7 @@ static int compute_parameters(struct processing_buffers *p)
 	return 0;
 }
 
-static void do_locate_events(int *events, struct processing_buffers *p, float *waveform, int last, int offset, int count)
+static void do_locate_events(struct detected_event *events, struct processing_buffers *p, float *waveform, int last, int offset, int count, unsigned char tictoc)
 {
 	int i;
 	memset(p->tic_wf, 0, p->sample_rate * sizeof(float));
@@ -705,11 +718,12 @@ static void do_locate_events(int *events, struct processing_buffers *p, float *w
 	for(i=0; i<count; i++) {
 		int a = round(last - offset - i*p->period - 0.02*p->sample_rate);
 		int b = round(last - offset - i*p->period + 0.02*p->sample_rate);
+		events[i].tictoc = tictoc;
 		if(a < 0 || b >= p->sample_count - p->period/2)
-			events[i] = -1;
+			events[i].pos = -1;
 		else {
 			int peak = peak_detector(p->tic_c,a,b);
-			events[i] = peak >= 0 ? offset + peak : -1;
+			events[i].pos = peak >= 0 ? offset + peak : -1;
 		}
 	}
 }
@@ -722,24 +736,29 @@ static void locate_events(struct processing_buffers *p)
 		return;
 	}
 
-	int events[2*count];
+	struct detected_event events[2*count];
 	int half = p->tic < p->period/2 ? 0 : round(p->period / 2);
 	int offset = p->tic - half - (p->tic_pulse - p->toc_pulse) / 2;
-	do_locate_events(events, p, p->waveform + half, (int)(p->last_tic + p->sample_count - p->timestamp), offset, count);
+	do_locate_events(events, p, p->waveform + half, (int)(p->last_tic + p->sample_count - p->timestamp), offset, count, 1);
 	half = p->toc < p->period/2 ? 0 : round(p->period / 2);
 	offset = p->toc - half - (p->toc_pulse - p->tic_pulse) / 2;
-	do_locate_events(events+count, p, p->waveform + half, (int)(p->last_toc + p->sample_count - p->timestamp), offset, count);
-	qsort(events, 2*count, sizeof(int), int_cmp);
+	do_locate_events(events+count, p, p->waveform + half, (int)(p->last_toc + p->sample_count - p->timestamp), offset, count, 0);
+	qsort(events, 2*count, sizeof(struct detected_event), detected_event_cmp);
 
 	int i,j;
 	for(i=0, j=0; i < 2*count; i++) {
-		if(events[i] < 0 ||
-				events[i] + p->timestamp < p->sample_count ||
-				events[i] + p->timestamp - p->sample_count < p->events_from)
+		uint64_t detected_pos = (uint64_t)events[i].pos;
+		if(events[i].pos < 0 ||
+				detected_pos + p->timestamp < (uint64_t)p->sample_count ||
+				detected_pos + p->timestamp - (uint64_t)p->sample_count < p->events_from)
 			continue;
-		p->events[j++] = events[i] + p->timestamp - p->sample_count;
+		p->events[j] = detected_pos + p->timestamp - (uint64_t)p->sample_count;
+		p->events_tictoc[j] = events[i].tictoc;
+		j++;
 	}
 	p->events[j] = 0;
+	if(j < EVENTS_MAX)
+		p->events_tictoc[j] = 0;
 }
 
 static void compute_amplitude(struct processing_buffers *p, double la)
@@ -899,7 +918,10 @@ void process(struct processing_buffers *p, int bph, double la, int light)
 {
 	prepare_data(p, !light);
 	p->ready = !compute_period(p,bph);
-	if(p->ready && p->period >= p->sample_rate / 2) {
+	/* Limit to 20% greater when period is known, or use typical BPH when guessing. */
+	const int min_bph = bph ? bph : TYP_BPH;
+	const int max_period = (int)(1.2 * 3600 * 2) * p->sample_rate / min_bph;
+	if(p->ready && p->period >= max_period) {
 		debug("Detected period too long\n");
 		p->ready = 0;
 	}

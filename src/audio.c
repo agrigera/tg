@@ -24,6 +24,8 @@ float pa_buffers[PA_BUFF_SIZE];
 int write_pointer = 0;
 uint64_t timestamp = 0;
 pthread_mutex_t audio_mutex;
+static PaDeviceIndex selected_input_device = paNoDevice;
+static int selected_sample_rate = PA_SAMPLE_RATE;
 
 /* Data for PA callback to use */
 static struct callback_info {
@@ -103,8 +105,8 @@ int start_portaudio(int *nominal_sample_rate, double *real_sample_rate)
 
 #ifdef DEBUG
 	if(testing) {
-		*nominal_sample_rate = PA_SAMPLE_RATE;
-		*real_sample_rate = PA_SAMPLE_RATE;
+		*nominal_sample_rate = selected_sample_rate;
+		*real_sample_rate = selected_sample_rate;
 		goto end;
 	}
 #endif
@@ -114,15 +116,39 @@ int start_portaudio(int *nominal_sample_rate, double *real_sample_rate)
 		error("No default audio input device found");
 		return 1;
 	}
-	long channels = Pa_GetDeviceInfo(default_input)->maxInputChannels;
+
+	PaDeviceIndex input_device = default_input;
+	if(selected_input_device != paNoDevice) {
+		const PaDeviceInfo *selected_info = Pa_GetDeviceInfo(selected_input_device);
+		if(selected_info && selected_info->maxInputChannels > 0)
+			input_device = selected_input_device;
+		else
+			debug("Selected audio device %d is not usable, falling back to default\n", (int)selected_input_device);
+	}
+
+	const PaDeviceInfo *input_info = Pa_GetDeviceInfo(input_device);
+	if(!input_info) {
+		error("Unable to query selected audio input device");
+		return 1;
+	}
+
+	long channels = input_info->maxInputChannels;
 	if(channels == 0) {
-		error("Default audio device has no input channels");
+		error("Selected audio device has no input channels");
 		return 1;
 	}
 	if(channels > 2) channels = 2;
 	info.channels = channels;
 	info.light = false;
-	err = Pa_OpenDefaultStream(&stream,channels,0,paFloat32,PA_SAMPLE_RATE,paFramesPerBufferUnspecified,paudio_callback,&info);
+
+	PaStreamParameters input_parameters;
+	input_parameters.device = input_device;
+	input_parameters.channelCount = (int)channels;
+	input_parameters.sampleFormat = paFloat32;
+	input_parameters.suggestedLatency = input_info->defaultLowInputLatency;
+	input_parameters.hostApiSpecificStreamInfo = NULL;
+
+	err = Pa_OpenStream(&stream,&input_parameters,NULL,selected_sample_rate,paFramesPerBufferUnspecified,paNoFlag,paudio_callback,&info);
 	if(err!=paNoError)
 		goto error;
 
@@ -131,8 +157,9 @@ int start_portaudio(int *nominal_sample_rate, double *real_sample_rate)
 		goto error;
 
 	const PaStreamInfo *info = Pa_GetStreamInfo(stream);
-	*nominal_sample_rate = PA_SAMPLE_RATE;
+	*nominal_sample_rate = selected_sample_rate;
 	*real_sample_rate = info->sampleRate;
+	selected_input_device = input_device;
 #ifdef DEBUG
 end:
 #endif
@@ -143,6 +170,87 @@ end:
 error:
 	error("Error opening audio input: %s", Pa_GetErrorText(err));
 	return 1;
+}
+
+int list_audio_input_devices(int **devices, char ***names, int *count, int *default_device)
+{
+	if(!devices || !names || !count || !default_device)
+		return 1;
+
+	*devices = NULL;
+	*names = NULL;
+	*count = 0;
+	*default_device = (int)Pa_GetDefaultInputDevice();
+
+	int ndevices = Pa_GetDeviceCount();
+	if(ndevices < 0)
+		return 1;
+
+	int *devs = malloc(ndevices * sizeof(*devs));
+	char **dev_names = malloc(ndevices * sizeof(*dev_names));
+	if(!devs || !dev_names) {
+		free(devs);
+		free(dev_names);
+		return 1;
+	}
+
+	int used = 0;
+	for(int i = 0; i < ndevices; i++) {
+		const PaDeviceInfo *di = Pa_GetDeviceInfo((PaDeviceIndex)i);
+		if(!di || di->maxInputChannels <= 0)
+			continue;
+
+		devs[used] = i;
+		dev_names[used] = strdup(di->name ? di->name : "Unknown device");
+		if(!dev_names[used]) {
+			for(int j = 0; j < used; j++)
+				free(dev_names[j]);
+			free(devs);
+			free(dev_names);
+			return 1;
+		}
+		used++;
+	}
+
+	if(!used) {
+		free(devs);
+		free(dev_names);
+		return 1;
+	}
+
+	*devices = devs;
+	*names = dev_names;
+	*count = used;
+	return 0;
+}
+
+void free_audio_input_devices(int *devices, char **names, int count)
+{
+	for(int i = 0; i < count; i++)
+		free(names[i]);
+	free(names);
+	free(devices);
+}
+
+void set_audio_input_device(int device)
+{
+	selected_input_device = device >= 0 ? (PaDeviceIndex)device : paNoDevice;
+}
+
+int get_audio_input_device(void)
+{
+	return selected_input_device == paNoDevice ? AUDIO_DEVICE_DEFAULT : (int)selected_input_device;
+}
+
+void set_audio_sample_rate(int sample_rate)
+{
+	if(sample_rate > 0)
+		selected_sample_rate = sample_rate;
+}
+
+int get_audio_sample_rate(void)
+{
+	return selected_sample_rate;
 }
 
 int terminate_portaudio()

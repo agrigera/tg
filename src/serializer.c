@@ -37,7 +37,8 @@ static char hex_digit(uint64_t n)
 
 static int write_hex_double(FILE *f, double d)
 {
-	uint64_t bd = *(uint64_t *)&d;
+	uint64_t bd;
+	memcpy(&bd, &d, sizeof(bd));
 	uint64_t mantissa = bd << 12;
 	uint64_t exponent = (bd >> 52) & 0x7ff;
 	uint64_t sign = bd >> 63;
@@ -223,6 +224,31 @@ static int scan_uint64_t_array(FILE *f, uint64_t **a, uint64_t max_l, uint64_t *
 	return 0;
 }
 
+static int serialize_bool_array(FILE *f, const unsigned char *a, uint64_t len)
+{
+	uint64_t i;
+	if(0 > fprintf(f, "A%"PRIu64";\n", len)) return 1;
+	for(i = 0; i < len; i++)
+		if(serialize_int(f, a[i])) return 1;
+	return 0;
+}
+
+static int scan_bool_array(FILE *f, unsigned char **a, uint64_t max_l, uint64_t *len)
+{
+	uint64_t l,i;
+	int n = 0;
+	if(1 != fscanf(f, " A%"SCNu64";%n", &l, &n) || !n) return 1;
+	if(max_l && l > max_l) return 1;
+	if(!*a) *a = malloc(l*sizeof(**a));
+	for(i = 0; i < l; i++) {
+		int j;
+		if(scan_int(f, &j)) return 1;
+		(*a)[i] = !!j;
+	}
+	if(len) *len = l;
+	return 0;
+}
+
 static int serialize_float_array(FILE *f, float *a, uint64_t len)
 {
 	uint64_t i;
@@ -327,6 +353,8 @@ static int serialize_snapshot(FILE *f, struct snapshot *s, char *name)
 	if(serialize_float_array(f, s->pb->waveform, s->pb->sample_count)) return 1;
 	if(make_label(f, "events")) return 1;
 	if(serialize_uint64_t_array(f, s->events, s->events_count)) return 1;
+	if(make_label(f, "events_tictoc")) return 1;
+	if(serialize_bool_array(f, s->events_tictoc, s->events_count)) return 1;
 	SERIALIZE(int,pb->sample_rate);
 	SERIALIZE(double,pb->period);
 	SERIALIZE(double,pb->waveform_max);
@@ -341,6 +369,7 @@ static int serialize_snapshot(FILE *f, struct snapshot *s, char *name)
 	SERIALIZE(double,la);
 	SERIALIZE(int,cal);
 	SERIALIZE(int,events_wp);
+	SERIALIZE(int,amps_wp);
 	SERIALIZE(int,signal);
 	SERIALIZE(double,sample_rate);
 	SERIALIZE(int,guessed_bph);
@@ -348,7 +377,12 @@ static int serialize_snapshot(FILE *f, struct snapshot *s, char *name)
 	SERIALIZE(double,be);
 	SERIALIZE(double,amp);
 	SERIALIZE(double,trace_centering);
+	SERIALIZE(double,trace_zoom);
 	SERIALIZE(int,is_light);
+	if(make_label(f, "amps")) return 1;
+	if(serialize_float_array(f, s->amps, s->amps_count)) return 1;
+	if(make_label(f, "amps_time")) return 1;
+	if(serialize_uint64_t_array(f, s->amps_time, s->amps_count)) return 1;
 	return serialize_struct_end(f);
 }
 
@@ -403,6 +437,28 @@ static int scan_snapshot(FILE *f, struct snapshot **s, char **name)
 			(*s)->events_count = x;
 			continue;
 		}
+		if(!strcmp("events_tictoc", l)) {
+			debug("serializer: scanning events_tictoc\n");
+			uint64_t x;
+			if(	(*s)->events_tictoc ||
+				scan_bool_array(f, &((*s)->events_tictoc), INT_MAX, &x)) goto error;
+			continue;
+		}
+		if(!strcmp("amps", l)) {
+			debug("serializer: scanning amps\n");
+			uint64_t x;
+			if(	(*s)->amps ||
+				scan_float_array(f, &((*s)->amps), INT_MAX, &x)) goto error;
+			(*s)->amps_count = x;
+			continue;
+		}
+		if(!strcmp("amps_time", l)) {
+			debug("serializer: scanning amps_time\n");
+			uint64_t x;
+			if(	(*s)->amps_time ||
+				scan_uint64_t_array(f, &((*s)->amps_time), INT_MAX, &x)) goto error;
+			continue;
+		}
 		SCAN(int,pb->sample_rate);
 		SCAN(double,pb->period);
 		SCAN(double,pb->waveform_max);
@@ -417,6 +473,7 @@ static int scan_snapshot(FILE *f, struct snapshot **s, char **name)
 		SCAN(double,la);
 		SCAN(int,cal);
 		SCAN(int,events_wp);
+		SCAN(int,amps_wp);
 		SCAN(int,signal);
 		SCAN(double,sample_rate);
 		SCAN(int,guessed_bph);
@@ -424,6 +481,7 @@ static int scan_snapshot(FILE *f, struct snapshot **s, char **name)
 		SCAN(double,be);
 		SCAN(double,amp);
 		SCAN(double,trace_centering);
+		SCAN(double,trace_zoom);
 		SCAN(int,is_light);
 
 		if(eat_object(f)) goto error;
@@ -443,6 +501,11 @@ static int scan_snapshot(FILE *f, struct snapshot **s, char **name)
 	debug("serializer: checking events\n");
 	if((*s)->events_count && (*s)->events_wp >= (*s)->events_count) goto error;
 	if((*s)->signal > NSTEPS) (*s)->signal = NSTEPS;
+	debug("serializer: checking events_tictoc\n");
+	if((*s)->events_tictoc && (*s)->events_count && !(*s)->events)
+		goto error;
+	if(!(*s)->events_tictoc && (*s)->events_count)
+		(*s)->events_tictoc = calloc((*s)->events_count, sizeof(*(*s)->events_tictoc));
 	debug("serializer: checking sample_rate\n");
 	if((*s)->sample_rate <= 0) goto error;
 	debug("serializer: checking guessed_bph\n");
@@ -453,6 +516,17 @@ static int scan_snapshot(FILE *f, struct snapshot **s, char **name)
 	if((*s)->be < 0 || (*s)->be > 99.9) goto error;
 	debug("serializer: checking amplitude\n");
 	if((*s)->amp < 0 || (*s)->amp > 360) goto error;
+	if((*s)->trace_zoom <= 0)
+		(*s)->trace_zoom = 1.0;
+	debug("serializer: checking amplitudes\n");
+	if((*s)->amps && (*s)->amps_count && !(*s)->amps_time)
+		goto error;
+	if(!(*s)->amps) {
+		(*s)->amps_count = 0;
+		(*s)->amps_wp = 0;
+	}
+	if((*s)->amps_count && (*s)->amps_wp >= (*s)->amps_count)
+		goto error;
 	(*s)->pb->events = NULL;
 #ifdef DEBUG
 	(*s)->pb->debug = NULL;
@@ -463,6 +537,9 @@ error:
 	free(*name);
 	free((*s)->pb->waveform);
 	free((*s)->pb);
+	free((*s)->amps_time);
+	free((*s)->amps);
+	free((*s)->events_tictoc);
 	free((*s)->events);
 	free(*s);
 	*s = NULL;
@@ -523,6 +600,10 @@ int read_file(FILE *f, struct snapshot ***s, char ***names, uint64_t *cnt)
 	debug("serializer: reading file\n");
 	char lbl[LABEL_SIZE+1];
 	char *l = lbl;
+	int found_snapshot_list = 0;
+	*cnt = 0;
+	*s = NULL;
+	*names = NULL;
 	if(scan_label(f, l) || strcmp("tg-timer-version",l)) return 1;
 	if(scan_string(f, &l, LABEL_SIZE, NULL)) return 1;
 	debug("serializer: read version %s\n",l);
@@ -530,26 +611,22 @@ int read_file(FILE *f, struct snapshot ***s, char ***names, uint64_t *cnt)
 	debug("serializer: found data structure\n",l);
 	int n = 0;
 	if(0 != fscanf(f, " T;%n", &n) || !n) return 1;
-	*s = NULL;
-	*names = NULL;
 	for(;;) {
 		if(scan_label(f,l)) goto error;
 		if(!strcmp("__end__",l)) break;
 		if(!strcmp("snapshot-list",l)) {
 			if(*s || scan_snapshot_list(f, s, names, cnt)) goto error;
-			else continue;
+			found_snapshot_list = 1;
+			continue;
 		}
 		if(eat_object(f)) goto error;
 	}
+	if(!found_snapshot_list) goto error;
 	debug("serializer: end of data structure\n",l);
 	char c;
-	if(*s && 1 != fscanf(f, " %c", &c)) return 0;
+	if(1 != fscanf(f, " %c", &c)) return 0;
 #ifdef DEBUG
-	if(*s) {
-		debug("serializer: stray char %c (%d) after end\n", c, c);
-	} else {
-		debug("serializer: no snapshots\n");
-	}
+	debug("serializer: stray char %c (%d) after end\n", c, c);
 #endif
 error:
 	debug("serializer: read error\n");
@@ -561,8 +638,9 @@ error:
 		}
 		free(*s);
 		free(*names);
-		*s = NULL;
-		*names = NULL;
 	}
+	*s = NULL;
+	*names = NULL;
+	*cnt = 0;
 	return 1;
 }

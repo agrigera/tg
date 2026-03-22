@@ -18,7 +18,7 @@
 
 #include "tg.h"
 
-cairo_pattern_t *black,*white,*red,*green,*blue,*blueish,*yellow;
+cairo_pattern_t *black,*white,*red,*green,*blue,*blueish,*yellow,*goldenrod;
 
 static void define_color(cairo_pattern_t **gc,double r,double g,double b)
 {
@@ -34,6 +34,7 @@ void initialize_palette()
 	define_color(&blue,0,0,1);
 	define_color(&blueish,0,0,.5);
 	define_color(&yellow,1,1,0);
+	define_color(&goldenrod,.980,.761,.020);
 }
 
 static void draw_graph(double a, double b, cairo_t *c, struct processing_buffers *p, GtkWidget *da)
@@ -58,7 +59,6 @@ static void draw_graph(double a, double b, cairo_t *c, struct processing_buffers
 
 		int k = round(y*height);
 		if(n < width) k = -k;
-
 		if(first) {
 			cairo_move_to(c,i+.5,height/2+k+.5);
 			first = 0;
@@ -66,7 +66,6 @@ static void draw_graph(double a, double b, cairo_t *c, struct processing_buffers
 			cairo_line_to(c,i+.5,height/2+k+.5);
 	}
 }
-
 #ifdef DEBUG
 static void draw_debug_graph(double a, double b, cairo_t *c, struct processing_buffers *p, GtkWidget *da)
 {
@@ -532,15 +531,16 @@ static gboolean paperstrip_draw_event(GtkWidget *widget, cairo_t *c, struct outp
 	struct snapshot *snst = op->snst;
 	uint64_t time = snst->timestamp ? snst->timestamp : get_timestamp(snst->is_light);
 	double sweep;
-	int zoom_factor;
+	double zoom_factor;
+	const double trace_zoom = snst->trace_zoom > 0 ? snst->trace_zoom : 1.0;
 	double slope = 1000; // detected rate: 1000 -> do not display
 	if(snst->calibrate) {
 		sweep = snst->nominal_sr;
-		zoom_factor = PAPERSTRIP_ZOOM_CAL;
+		zoom_factor = PAPERSTRIP_ZOOM_CAL * trace_zoom;
 		slope = (double) snst->cal * zoom_factor / (10 * 3600 * 24);
 	} else {
 		sweep = snst->sample_rate * 3600. / snst->guessed_bph;
-		zoom_factor = PAPERSTRIP_ZOOM;
+		zoom_factor = PAPERSTRIP_ZOOM * trace_zoom;
 		if(snst->events_count && snst->events[snst->events_wp])
 			slope = - snst->rate * zoom_factor / (3600. * 24.);
 	}
@@ -616,13 +616,50 @@ static gboolean paperstrip_draw_event(GtkWidget *widget, cairo_t *c, struct outp
 		cairo_stroke(c);
 	}
 
-	cairo_set_source(c,stopped?yellow:white);
+	if(!snst->calibrate && snst->amps_count && snst->amps && snst->amps_time) {
+		int path_started = 0;
+		cairo_set_source(c, yellow);
+		for(i = snst->amps_wp;;) {
+			if(!snst->amps_time[i]) break;
+			double event_age = now - snst->amps_time[i];
+			double row = floor(event_age / sweep);
+			if(row >= height) break;
+
+			double amp_deg = snst->la * snst->amps[i];
+			double amp_norm = (amp_deg - 135.0) / (360.0 - 135.0);
+			if(amp_norm < 0) amp_norm = 0;
+			if(amp_norm > 1) amp_norm = 1;
+
+			double column = right_margin - amp_norm * (strip_width - 1);
+			if(!path_started) {
+				cairo_move_to(c, column, row);
+				path_started = 1;
+			} else {
+				cairo_line_to(c, column, row);
+			}
+
+			if(--i < 0) i = snst->amps_count - 1;
+			if(i == snst->amps_wp) break;
+		}
+		if(path_started)
+			cairo_stroke(c);
+	}
+
 	for(i = snst->events_wp;;) {
 		if(!snst->events_count || !snst->events[i]) break;
 		double event = now - snst->events[i] + snst->trace_centering + sweep * PAPERSTRIP_MARGIN / (2 * zoom_factor);
 		int column = floor(fmod(event, (sweep / zoom_factor)) * strip_width / (sweep / zoom_factor));
 		int row = floor(event / sweep);
 		if(row >= height) break;
+
+		if(stopped) {
+			cairo_set_source(c, yellow);
+		} else if(snst->events_tictoc) {
+			cairo_set_source(c, snst->events_tictoc[i] ? white : goldenrod);
+		} else {
+			cairo_set_source(c, white);
+		}
+
 		cairo_move_to(c,column,row);
 		cairo_line_to(c,column+1,row);
 		cairo_line_to(c,column+1,row+1);
@@ -713,6 +750,10 @@ static void handle_clear_trace(GtkButton *b, struct output_panel *op)
 		lock_computer(op->computer);
 		if(!op->snst->calibrate) {
 			memset(op->snst->events,0,op->snst->events_count*sizeof(uint64_t));
+			memset(op->snst->events_tictoc,0,op->snst->events_count*sizeof(unsigned char));
+			memset(op->snst->amps,0,op->snst->amps_count*sizeof(*op->snst->amps));
+			memset(op->snst->amps_time,0,op->snst->amps_count*sizeof(*op->snst->amps_time));
+			op->snst->trace_zoom = 1.0;
 			op->computer->clear_trace = 1;
 		}
 		unlock_computer(op->computer);
@@ -730,11 +771,22 @@ static void handle_center_trace(GtkButton *b, struct output_panel *op)
 	double new_centering;
 	if(last_ev) {
 		double sweep;
-		if(snst->calibrate)
-			sweep = (double) snst->nominal_sr / PAPERSTRIP_ZOOM_CAL;
-		else
-			sweep = snst->sample_rate * 3600. / (PAPERSTRIP_ZOOM * snst->guessed_bph);
-		new_centering = fmod(last_ev + .5*sweep , sweep);
+		double zoom_factor;
+		double time = snst->timestamp ? snst->timestamp : get_timestamp(snst->is_light);
+		double now;
+		double chart_width;
+		if(snst->calibrate) {
+			sweep = (double) snst->nominal_sr;
+			zoom_factor = PAPERSTRIP_ZOOM_CAL * (snst->trace_zoom > 0 ? snst->trace_zoom : 1.0);
+		} else {
+			sweep = snst->sample_rate * 3600. / snst->guessed_bph;
+			zoom_factor = PAPERSTRIP_ZOOM * (snst->trace_zoom > 0 ? snst->trace_zoom : 1.0);
+		}
+		now = sweep * ceil(time / sweep);
+		chart_width = sweep / zoom_factor;
+		new_centering = fmod(0.5 * chart_width - fmod(now - last_ev, chart_width), chart_width);
+		if(new_centering < 0)
+			new_centering += chart_width;
 	} else 
 		new_centering = 0;
 	snst->trace_centering = new_centering;
@@ -744,12 +796,55 @@ static void handle_center_trace(GtkButton *b, struct output_panel *op)
 static void shift_trace(struct output_panel *op, double direction)
 {
 	struct snapshot *snst = op->snst;
-	double sweep;
-	if(snst->calibrate)
-		sweep = (double) snst->nominal_sr / PAPERSTRIP_ZOOM_CAL;
-	else
-		sweep = snst->sample_rate * 3600. / (PAPERSTRIP_ZOOM * snst->guessed_bph);
-	snst->trace_centering = fmod(snst->trace_centering + sweep * (1.+.1*direction), sweep);
+	double chart_width;
+	double zoom_factor;
+	if(snst->calibrate) {
+		chart_width = (double) snst->nominal_sr;
+		zoom_factor = PAPERSTRIP_ZOOM_CAL * (snst->trace_zoom > 0 ? snst->trace_zoom : 1.0);
+	} else {
+		chart_width = snst->sample_rate * 3600. / snst->guessed_bph;
+		zoom_factor = PAPERSTRIP_ZOOM * (snst->trace_zoom > 0 ? snst->trace_zoom : 1.0);
+	}
+	chart_width /= zoom_factor;
+	snst->trace_centering = fmod(snst->trace_centering + chart_width * 0.1 * direction, chart_width);
+	if(snst->trace_centering < 0)
+		snst->trace_centering += chart_width;
+	gtk_widget_queue_draw(op->paperstrip_drawing_area);
+}
+
+static void zoom_trace(struct output_panel *op, double factor)
+{
+	struct snapshot *snst = op->snst;
+	if(!snst)
+		return;
+	if(snst->trace_zoom <= 0)
+		snst->trace_zoom = 1.0;
+	snst->trace_zoom *= factor;
+	if(snst->trace_zoom < 0.25)
+		snst->trace_zoom = 0.25;
+	if(snst->trace_zoom > 8.0)
+		snst->trace_zoom = 8.0;
+	gtk_widget_queue_draw(op->paperstrip_drawing_area);
+}
+
+static void handle_zoom_out(GtkButton *b, struct output_panel *op)
+{
+	UNUSED(b);
+	zoom_trace(op, 1.0 / 1.25);
+}
+
+static void handle_zoom_in(GtkButton *b, struct output_panel *op)
+{
+	UNUSED(b);
+	zoom_trace(op, 1.25);
+}
+
+static void handle_zoom_reset(GtkButton *b, struct output_panel *op)
+{
+	UNUSED(b);
+	if(!op->snst)
+		return;
+	op->snst->trace_zoom = 1.0;
 	gtk_widget_queue_draw(op->paperstrip_drawing_area);
 }
 
@@ -768,6 +863,8 @@ static void handle_right(GtkButton *b, struct output_panel *op)
 void op_set_snapshot(struct output_panel *op, struct snapshot *snst)
 {
 	op->snst = snst;
+	if(op->snst && op->snst->trace_zoom <= 0)
+		op->snst->trace_zoom = 1.0;
 	gtk_widget_set_sensitive(op->clear_button, !snst->calibrate);
 }
 
@@ -832,6 +929,18 @@ struct output_panel *init_output_panel(struct computer *comp, struct snapshot *s
 	GtkWidget *center_button = gtk_button_new_with_label("Center");
 	gtk_box_pack_start(GTK_BOX(hbox3), center_button, TRUE, TRUE, 0);
 	g_signal_connect (center_button, "clicked", G_CALLBACK(handle_center_trace), op);
+
+	GtkWidget *zoom_out_button = gtk_button_new_with_label("-");
+	gtk_box_pack_start(GTK_BOX(hbox3), zoom_out_button, TRUE, TRUE, 0);
+	g_signal_connect (zoom_out_button, "clicked", G_CALLBACK(handle_zoom_out), op);
+
+	GtkWidget *zoom_reset_button = gtk_button_new_with_label("1x");
+	gtk_box_pack_start(GTK_BOX(hbox3), zoom_reset_button, TRUE, TRUE, 0);
+	g_signal_connect (zoom_reset_button, "clicked", G_CALLBACK(handle_zoom_reset), op);
+
+	GtkWidget *zoom_in_button = gtk_button_new_with_label("+");
+	gtk_box_pack_start(GTK_BOX(hbox3), zoom_in_button, TRUE, TRUE, 0);
+	g_signal_connect (zoom_in_button, "clicked", G_CALLBACK(handle_zoom_in), op);
 
 	// > button
 	GtkWidget *right_button = gtk_button_new_with_label(">");
