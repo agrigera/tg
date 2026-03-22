@@ -2,6 +2,11 @@
 
 Tg is a desktop timegrapher for mechanical watches. It listens to the ticking sound through the machine's audio input and estimates values such as rate, beat error, amplitude, and beat frequency.
 
+## Download
+
+- Windows installer (.msi): https://github.com/agrigera/tg/releases/download/v0.8.0/tg-timer_0.8.0.msi
+- Latest release page (all assets): https://github.com/agrigera/tg/releases/latest
+
 ## What You Need
 
 - a working microphone or audio input device
