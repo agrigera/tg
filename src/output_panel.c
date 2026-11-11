@@ -887,12 +887,71 @@ static void handle_right(GtkButton *b, struct output_panel *op)
 	shift_trace(op,1);
 }
 
+/* While calibrating, the waveform panels are meaningless: show instructions instead */
+static void update_right_side(struct output_panel *op)
+{
+	const char *page = op->snst && op->snst->calibrate ? "calibration" : "panels";
+	const gchar *current = gtk_stack_get_visible_child_name(GTK_STACK(op->right_stack));
+	if(!current || strcmp(current, page))
+		gtk_stack_set_visible_child_name(GTK_STACK(op->right_stack), page);
+}
+
+static GtkWidget *make_calibration_instructions(void)
+{
+	static const char *markup =
+		"<span size='x-large' weight='bold'>Calibration in progress</span>\n"
+		"\n"
+		"Calibration measures how fast your sound card clock really runs, so that "
+		"rates are not skewed by the computer. It takes about 15 minutes (900 ticks).\n"
+		"\n"
+		"<b>1. Use a quartz reference</b>\n"
+		"Place a quartz watch or clock that ticks once per second (an analog one with "
+		"a seconds hand) very close to the microphone, ideally touching it. "
+		"Its accuracy becomes your calibration accuracy.\n"
+		"\n"
+		"<b>2. Keep it quiet</b>\n"
+		"Work in a quiet room, switch off nearby fans and speakers, and do not touch "
+		"the desk while calibrating. Raise the microphone gain only as far as needed to "
+		"hear the tick clearly without distortion.\n"
+		"\n"
+		"<b>3. Watch the status at the top</b>\n"
+		"<b>cal (wait)</b>: no steady 1 tick per second found yet, check the setup.\n"
+		"<b>cal (acq.) NN %</b>: collecting ticks, leave everything untouched.\n"
+		"<b>cal (done) \302\261X.X s/d</b>: finished. The value is copied to the "
+		"<b>cal</b> field and saved.\n"
+		"<b>cal (fail)</b>: the signal was too irregular. Improve the setup and start again.\n"
+		"\n"
+		"<b>4. Finish</b>\n"
+		"When it shows <b>done</b>, untick <b>Calibrate</b> in the menu to return to "
+		"normal measurement. Repeat once to confirm the result is consistent, and "
+		"calibrate again whenever you change the audio input or the sample rate.";
+
+	GtkWidget *label = gtk_label_new(NULL);
+	gtk_label_set_markup(GTK_LABEL(label), markup);
+	gtk_label_set_line_wrap(GTK_LABEL(label), TRUE);
+	gtk_label_set_max_width_chars(GTK_LABEL(label), 80);
+	gtk_label_set_xalign(GTK_LABEL(label), 0);
+	gtk_widget_set_halign(label, GTK_ALIGN_CENTER);
+	gtk_widget_set_valign(label, GTK_ALIGN_CENTER);
+	gtk_widget_set_margin_start(label, 20);
+	gtk_widget_set_margin_end(label, 20);
+	gtk_widget_set_margin_top(label, 20);
+	gtk_widget_set_margin_bottom(label, 20);
+
+	// Scroll if the window is too small to show everything
+	GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
+	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+	gtk_container_add(GTK_CONTAINER(scroll), label);
+	return scroll;
+}
+
 void op_set_snapshot(struct output_panel *op, struct snapshot *snst)
 {
 	op->snst = snst;
 	if(op->snst && op->snst->trace_zoom <= 0)
 		op->snst->trace_zoom = 1.0;
 	gtk_widget_set_sensitive(op->clear_button, !snst->calibrate);
+	update_right_side(op);
 }
 
 void op_set_border(struct output_panel *op, int i)
@@ -974,8 +1033,15 @@ struct output_panel *init_output_panel(struct computer *comp, struct snapshot *s
 	gtk_box_pack_start(GTK_BOX(hbox3), right_button, TRUE, TRUE, 0);
 	g_signal_connect (right_button, "clicked", G_CALLBACK(handle_right), op);
 
+	// Right side: waveform panels, or calibration instructions while calibrating
+	op->right_stack = gtk_stack_new();
+	gtk_box_pack_start(GTK_BOX(hbox2), op->right_stack, TRUE, TRUE, 0);
+
 	GtkWidget *vbox3 = gtk_box_new(GTK_ORIENTATION_VERTICAL,10);
-	gtk_box_pack_start(GTK_BOX(hbox2), vbox3, TRUE, TRUE, 0);
+	gtk_stack_add_named(GTK_STACK(op->right_stack), vbox3, "panels");
+
+	GtkWidget *cal_info = make_calibration_instructions();
+	gtk_stack_add_named(GTK_STACK(op->right_stack), cal_info, "calibration");
 
 	// Tic waveform area
 	op->tic_drawing_area = gtk_drawing_area_new();
@@ -1001,6 +1067,11 @@ struct output_panel *init_output_panel(struct computer *comp, struct snapshot *s
 	g_signal_connect (op->debug_drawing_area, "draw", G_CALLBACK(debug_draw_event), op);
 	gtk_widget_set_events(op->debug_drawing_area, GDK_EXPOSURE_MASK);
 #endif
+
+	// GtkStack only switches to visible children
+	gtk_widget_show_all(vbox3);
+	gtk_widget_show_all(cal_info);
+	update_right_side(op);
 
 	return op;
 }

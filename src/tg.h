@@ -223,6 +223,7 @@ struct output_panel {
 	GtkWidget *period_drawing_area;
 	GtkWidget *paperstrip_drawing_area;
 	GtkWidget *clear_button;
+	GtkWidget *right_stack; // "panels" (tic/toc/period) or "calibration" (instructions)
 #ifdef DEBUG
 	GtkWidget *debug_drawing_area;
 #endif
