@@ -240,6 +240,8 @@ struct output_panel {
 	GtkWidget *right_stack; // "panels" (tic/toc/period) or "calibration" (instructions)
 	GtkWidget *output_frame;     // titled frames whose title depends on calibration
 	GtkWidget *paperstrip_frame;
+	double guide_rate;           // filtered rate (s/d) for the paper strip rate guide
+	gint64 guide_time;           // monotonic time of the last filter update, 0 = restart
 #ifdef DEBUG
 	GtkWidget *debug_drawing_area;
 #endif

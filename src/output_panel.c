@@ -18,7 +18,25 @@
 
 #include "tg.h"
 
-cairo_pattern_t *black,*white,*red,*green,*blue,*blueish,*yellow,*goldenrod;
+/* Colour semantics, the same in every panel:
+ *   tic = grey, toc = gold, amplitude = magenta, rate/reference = azure,
+ *   axes and grids = white (solid = major, dotted = minor), error = red,
+ *   status OK (watch icon, calibration done) = green.
+ * A stale reading keeps its colour but is drawn faded. */
+cairo_pattern_t *black,*white,*red,*green;
+
+struct color { double r, g, b; };
+static const struct color COL_TIC  = {.722, .722, .722};
+static const struct color COL_TOC  = {.980, .761, .020};
+static const struct color COL_AMP  = {1, .310, .816}; // magenta #FF4FD0
+static const struct color COL_RATE = {.302, .651, 1};
+static const struct color COL_WAVE = {.902, .902, .902}; // neutral, for both beats
+static const struct color COL_AXIS = {1, 1, 1};
+
+#define ALPHA_STALE       0.4
+#define ALPHA_AXIS_MAJOR  0.55
+#define ALPHA_AXIS_MINOR  0.25
+#define ALPHA_BAND        0.18	// tic / toc windows in the period panel
 
 static void define_color(cairo_pattern_t **gc,double r,double g,double b)
 {
@@ -29,12 +47,36 @@ void initialize_palette()
 {
 	define_color(&black,0,0,0);
 	define_color(&white,1,1,1);
-	define_color(&red,1,0,0);
+	define_color(&red,1,.231,.188);
 	define_color(&green,0,0.8,0);
-	define_color(&blue,0,0,1);
-	define_color(&blueish,0,0,.5);
-	define_color(&yellow,1,1,0);
-	define_color(&goldenrod,.980,.761,.020);
+}
+
+static void set_color(cairo_t *c, struct color col, double alpha)
+{
+	cairo_set_source_rgba(c, col.r, col.g, col.b, alpha);
+}
+
+/* Colour of measured data: faded when the reading is stale */
+static void set_signal_color(cairo_t *c, struct color col, int stale)
+{
+	set_color(c, col, stale ? ALPHA_STALE : 1);
+}
+
+static void set_dotted(cairo_t *c, int dotted)
+{
+	static const double dots[2] = {2, 4};
+	if(dotted)
+		cairo_set_dash(c, dots, 2, 0);
+	else
+		cairo_set_dash(c, NULL, 0, 0);
+}
+
+/* Line style of an axis or grid: major = solid, minor = dotted and fainter.
+ * Call set_dotted(c, 0) after stroking to go back to solid lines. */
+static void set_axis_style(cairo_t *c, struct color col, int major)
+{
+	set_color(c, col, major ? ALPHA_AXIS_MAJOR : ALPHA_AXIS_MINOR);
+	set_dotted(c, !major);
 }
 
 static void draw_graph(double a, double b, cairo_t *c, struct processing_buffers *p, GtkWidget *da)
@@ -223,7 +265,7 @@ static void draw_results_table(cairo_t *c, double x0, double width, double heigh
 			unit[i] = "";
 		}
 	}
-	snprintf(num[3], sizeof(num[3]), "%.1f", snst->la);
+	snprintf(num[3], sizeof(num[3]), "%.0f", snst->la); // whole degrees only
 	unit[3] = "\xC2\xB0";
 	snprintf(num[4], sizeof(num[4]), "%d", snst->guessed_bph);
 	unit[4] = "";
@@ -268,12 +310,22 @@ static void draw_results_table(cairo_t *c, double x0, double width, double heigh
 	cairo_line_to(c, x0 + width, round(RESULT_LINE * height) + .5);
 	cairo_stroke(c);
 
-	// Values; the measured ones are shown in yellow while the reading is stale
+	// Values: rate in the rate colour, amplitude in the amplitude colour, the
+	// rest white. Measured values are faded while the reading is stale.
 	cairo_set_font_size(c, fv);
 	cairo_text_extents(c, "0", &e);
 	double y_value = RESULT_VALUE_ROW * height - e.y_bearing - e.height / 2;
 	for(i = 0; i < RESULT_COLUMNS; i++) {
-		cairo_set_source(c, i < 3 && p && snst->is_old ? yellow : white);
+		if(i < 3 && !p)
+			set_color(c, COL_AXIS, ALPHA_STALE);
+		else if(i == 0)
+			set_signal_color(c, COL_RATE, snst->is_old);
+		else if(i == 1)
+			set_signal_color(c, COL_AMP, snst->is_old);
+		else if(i == 2)
+			set_signal_color(c, COL_AXIS, snst->is_old);
+		else
+			set_color(c, COL_AXIS, 1);
 		cairo_text_extents(c, unit[i], &e);
 		double digits = cell * strlen(num[i]);
 		double x = x0 + col_w * (i + 0.5) - (digits + e.x_advance) / 2;
@@ -320,7 +372,10 @@ static gboolean output_draw_event(GtkWidget *widget, cairo_t *c, struct output_p
 				cairo_show_text(c,"done");
 				break;
 			case 0:
-				cairo_set_source(c, snst->signal == NSTEPS ? white : yellow);
+				if(snst->signal == NSTEPS)
+					cairo_set_source(c, white);
+				else
+					set_color(c, COL_AXIS, ALPHA_STALE);
 				cairo_show_text(c, snst->signal == NSTEPS ? "acq." : "wait");
 				break;
 			case -1:
@@ -374,6 +429,7 @@ static void expose_waveform(
 			struct output_panel *op,
 			GtkWidget *da,
 			cairo_t *c,
+			struct color wave_color,
 			int (*get_offset)(struct processing_buffers*),
 			double (*get_pulse)(struct processing_buffers*))
 {
@@ -393,16 +449,15 @@ static void expose_waveform(
 
 	cairo_set_font_size(c,font);
 
+	// Time axis (bottom half, white): solid every 5 ms, dotted every ms
 	for(i = 1-NEGATIVE_SPAN; i < POSITIVE_SPAN; i++) {
 		int x = (NEGATIVE_SPAN + i) * width / (POSITIVE_SPAN + NEGATIVE_SPAN);
 		cairo_move_to(c, x + .5, height / 2 + .5);
 		cairo_line_to(c, x + .5, height - .5);
-		if(i%5)
-			cairo_set_source(c,green);
-		else
-			cairo_set_source(c,red);
+		set_axis_style(c, COL_AXIS, !(i%5));
 		cairo_stroke(c);
 	}
+	set_dotted(c, 0);
 	cairo_set_source(c,white);
 	for(i = 1-NEGATIVE_SPAN; i < POSITIVE_SPAN; i++) {
 		if(!(i%5)) {
@@ -425,6 +480,7 @@ static void expose_waveform(
 	int old = snst->is_old;
 	double period = p ? p->period / snst->sample_rate : 7200. / snst->guessed_bph;
 
+	// Amplitude scale (top half, green): solid every 50 deg, dotted every 10 deg
 	for(i = 10; i < 360; i+=10) {
 		if(2*i < snst->la) continue;
 		double t = period*amplitude_to_time(snst->la,i);
@@ -432,15 +488,13 @@ static void expose_waveform(
 		int x = round(width * (NEGATIVE_SPAN - 1000*t) / (NEGATIVE_SPAN + POSITIVE_SPAN));
 		cairo_move_to(c, x+.5, .5);
 		cairo_line_to(c, x+.5, height / 2 + .5);
-		if(i % 50)
-			cairo_set_source(c,green);
-		else
-			cairo_set_source(c,red);
+		set_axis_style(c, COL_AMP, !(i % 50));
 		cairo_stroke(c);
 	}
+	set_dotted(c, 0);
 
 	double last_x = 0;
-	cairo_set_source(c,white);
+	set_color(c, COL_AMP, 1);
 	for(i = 50; i < 360; i+=50) {
 		double t = period*amplitude_to_time(snst->la,i);
 		if(t > .001 * NEGATIVE_SPAN) continue;
@@ -469,23 +523,24 @@ static void expose_waveform(
 
 		draw_graph(a,b,c,p,da);
 
-		cairo_set_source(c,old?yellow:white);
+		set_signal_color(c, wave_color, old);
 		cairo_stroke_preserve(c);
 		cairo_fill(c);
 
+		// Detected pulse position: reference colour
 		double pulse = get_pulse(p);
 		if(pulse > 0) {
 			int x = round((NEGATIVE_SPAN - pulse / span) * width / (POSITIVE_SPAN + NEGATIVE_SPAN));
 			cairo_move_to(c, x, 1);
 			cairo_line_to(c, x, height - 1);
-			cairo_set_source(c,blue);
+			set_signal_color(c, COL_RATE, old);
 			cairo_set_line_width(c,2);
 			cairo_stroke(c);
 		}
 	} else {
 		cairo_move_to(c, .5, height / 2 + .5);
 		cairo_line_to(c, width - .5, height / 2 + .5);
-		cairo_set_source(c,yellow);
+		set_color(c, COL_AXIS, ALPHA_STALE);
 		cairo_stroke(c);
 	}
 }
@@ -513,20 +568,20 @@ static double get_toc_pulse(struct processing_buffers *p)
 static gboolean tic_draw_event(GtkWidget *widget, cairo_t *c, struct output_panel *op)
 {
 	UNUSED(widget);
-	expose_waveform(op, op->tic_drawing_area, c, get_tic, get_tic_pulse);
+	expose_waveform(op, op->tic_drawing_area, c, COL_TIC, get_tic, get_tic_pulse);
 	return FALSE;
 }
 
 static gboolean toc_draw_event(GtkWidget *widget, cairo_t *c, struct output_panel *op)
 {
 	UNUSED(widget);
-	expose_waveform(op, op->toc_drawing_area, c, get_toc, get_toc_pulse);
+	expose_waveform(op, op->toc_drawing_area, c, COL_TOC, get_toc, get_toc_pulse);
 	return FALSE;
 }
 
 /* Vertical grid with ms labels for a window starting at t_left ms and span_ms wide.
- * Major (red, labelled) lines use a round step giving at most ~10 labels; minor
- * (green) lines divide each major step in 5. */
+ * Major (solid, labelled) lines use a round step giving at most ~10 labels; minor
+ * (dotted) lines divide each major step in 5. */
 static void draw_ms_axis(cairo_t *c, int width, int height, int font, double t_left, double span_ms)
 {
 	static const int majors[] = {5, 10, 20, 25, 50, 100, 200, 250, 500, 0};
@@ -549,9 +604,10 @@ static void draw_ms_axis(cairo_t *c, int width, int height, int font, double t_l
 		if(x <= 0 || x >= width) continue;
 		cairo_move_to(c, round(x) + .5, .5);
 		cairo_line_to(c, round(x) + .5, height - .5);
-		cairo_set_source(c, k % 5 ? green : red);
+		set_axis_style(c, COL_AXIS, !(k % 5));
 		cairo_stroke(c);
 	}
+	set_dotted(c, 0);
 
 	cairo_set_font_size(c, font);
 	cairo_text_extents_t extents;
@@ -602,14 +658,14 @@ static gboolean period_draw_event(GtkWidget *widget, cairo_t *c, struct output_p
 		cairo_line_to(c, (p->tic - a - NEGATIVE_SPAN*.001*snst->sample_rate) * width/p->period, height);
 		cairo_line_to(c, (p->tic - a + POSITIVE_SPAN*.001*snst->sample_rate) * width/p->period, height);
 		cairo_line_to(c, (p->tic - a + POSITIVE_SPAN*.001*snst->sample_rate) * width/p->period, 0);
-		cairo_set_source(c,blueish);
+		set_color(c, COL_TIC, ALPHA_BAND); // tic window: grey tint
 		cairo_fill(c);
 
 		cairo_move_to(c, (toc - a - NEGATIVE_SPAN*.001*snst->sample_rate) * width/p->period, 0);
 		cairo_line_to(c, (toc - a - NEGATIVE_SPAN*.001*snst->sample_rate) * width/p->period, height);
 		cairo_line_to(c, (toc - a + POSITIVE_SPAN*.001*snst->sample_rate) * width/p->period, height);
 		cairo_line_to(c, (toc - a + POSITIVE_SPAN*.001*snst->sample_rate) * width/p->period, 0);
-		cairo_set_source(c,blueish);
+		set_color(c, COL_TOC, ALPHA_BAND); // toc window: gold tint
 		cairo_fill(c);
 	}
 
@@ -630,17 +686,75 @@ static gboolean period_draw_event(GtkWidget *widget, cairo_t *c, struct output_p
 	if(p) {
 		draw_graph(a,b,c,p,op->period_drawing_area);
 
-		cairo_set_source(c,old?yellow:white);
+		set_signal_color(c, COL_WAVE, old);
 		cairo_stroke_preserve(c);
 		cairo_fill(c);
 	} else {
 		cairo_move_to(c, .5, height / 2 + .5);
 		cairo_line_to(c, width - .5, height / 2 + .5);
-		cairo_set_source(c,yellow);
+		set_color(c, COL_AXIS, ALPHA_STALE);
 		cairo_stroke(c);
 	}
 
 	return FALSE;
+}
+
+/* The measured rate changes a little with every reading, which would make the
+ * rate guide lines swing all the time. For the live display the guide follows a
+ * low-pass filtered rate instead; a big change is a new situation (another
+ * watch, a different bph) and is followed at once. Saved snapshots are static
+ * and use their own rate. */
+#define GUIDE_RATE_TAU  10.0	// filter time constant, seconds
+#define GUIDE_RATE_JUMP 5.0	// s/d
+
+static double guide_rate(struct output_panel *op)
+{
+	double rate = op->snst->rate;
+	if(!op->computer)
+		return rate;
+
+	gint64 now = g_get_monotonic_time();
+	if(!op->guide_time || fabs(rate - op->guide_rate) > GUIDE_RATE_JUMP) {
+		op->guide_rate = rate;
+	} else {
+		// Time based, so that the number of redraws makes no difference
+		double dt = (now - op->guide_time) / 1e6;
+		op->guide_rate += (1 - exp(-dt / GUIDE_RATE_TAU)) * (rate - op->guide_rate);
+	}
+	op->guide_time = now;
+	return op->guide_rate;
+}
+
+#define LEGEND_DOT  0
+#define LEGEND_LINE 1
+#define LEGEND_DASH 2
+
+/* One legend entry (marker and text) at baseline y; returns where the next one starts */
+static double legend_item(cairo_t *c, double x, double y, int style, struct color col, const char *text)
+{
+	static const double dashes[2] = {4, 3};
+	cairo_text_extents_t e;
+
+	set_color(c, col, 1);
+	if(style == LEGEND_DOT) {
+		cairo_arc(c, x + 3, y - 3.5, 3, 0, 2 * M_PI);
+		cairo_fill(c);
+		x += 10;
+	} else {
+		cairo_set_line_width(c, 1.5);
+		if(style == LEGEND_DASH)
+			cairo_set_dash(c, dashes, 2, 0);
+		cairo_move_to(c, x, y - 3.5);
+		cairo_line_to(c, x + 16, y - 3.5);
+		cairo_stroke(c);
+		set_dotted(c, 0);
+		x += 20;
+	}
+	set_color(c, COL_AXIS, 0.85);
+	cairo_text_extents(c, text, &e);
+	cairo_move_to(c, x, y);
+	cairo_show_text(c, text);
+	return x + e.x_advance + 14;
 }
 
 static gboolean paperstrip_draw_event(GtkWidget *widget, cairo_t *c, struct output_panel *op)
@@ -667,7 +781,9 @@ static gboolean paperstrip_draw_event(GtkWidget *widget, cairo_t *c, struct outp
 		sweep = safe_sample_rate * 3600. / safe_bph;
 		zoom_factor = PAPERSTRIP_ZOOM * trace_zoom;
 		if(valid_events_wp && snst->events[snst->events_wp])
-			slope = - snst->rate * zoom_factor / (3600. * 24.);
+			slope = - guide_rate(op) * zoom_factor / (3600. * 24.);
+		else
+			op->guide_time = 0; // no trace: start over when it comes back
 	}
 	if(!isfinite(sweep) || sweep <= 0 || !isfinite(zoom_factor) || zoom_factor <= 0)
 		return FALSE;
@@ -689,157 +805,247 @@ static gboolean paperstrip_draw_event(GtkWidget *widget, cairo_t *c, struct outp
 	}
 
 	int strip_width = round(width / (1 + PAPERSTRIP_MARGIN));
-
-	cairo_set_line_width(c,1.3);
-
-	slope *= strip_width;
-	if(slope <= 2 && slope >= -2) {
-		for(i=0; i<4; i++) {
-			double y = 0;
-			cairo_move_to(c, (double)width * (i+.5) / 4, 0);
-			for(;;) {
-				double x = y * slope + (double)width * (i+.5) / 4;
-				x = fmod(x, width);
-				if(x < 0) x += width;
-				double nx = x + slope * (height - y);
-				if(nx >= 0 && nx <= width) {
-					cairo_line_to(c, nx, height);
-					break;
-				} else {
-					double d = slope > 0 ? width - x : x;
-					y += d / fabs(slope);
-					cairo_line_to(c, slope > 0 ? width : 0, y);
-					y += 1;
-					if(y > height) break;
-					cairo_move_to(c, slope > 0 ? 0 : width, y);
-				}
-			}
-		}
-		cairo_set_source(c, blue);
-		cairo_stroke(c);
-	}
-
-	cairo_set_line_width(c,1);
-
 	int left_margin = (width - strip_width) / 2;
 	int right_margin = (width + strip_width) / 2;
-	cairo_move_to(c, left_margin + .5, .5);
-	cairo_line_to(c, left_margin + .5, height - .5);
-	cairo_move_to(c, right_margin + .5, .5);
-	cairo_line_to(c, right_margin + .5, height - .5);
-	cairo_set_source(c, green);
-	cairo_stroke(c);
+
+	GtkAllocation toplevel;
+	gtk_widget_get_allocation(gtk_widget_get_toplevel(widget), &toplevel);
+	int font = toplevel.width / 90;
+	if(font < 12)
+		font = 12;
+
+	/* Layout: scales on top, the data in the middle with the newest beats at
+	 * its bottom edge (older ones move up), legend at the bottom. */
+	const int scale_rows = snst->calibrate ? 1 : 2;
+	const double plot_top = scale_rows * (font + 4) + 4;
+	const double plot_bottom = height - (font + 8);
+	if(plot_bottom - plot_top < 20)
+		return FALSE;
+
+	// Width of the strip in ms (a beat in normal mode, a second in calibration, divided by the zoom)
+	const double window_ms = snst->calibrate ? 1000. / zoom_factor : 3600000. / (safe_bph * zoom_factor);
+	// Amplitude scale: linear, 135 deg at the left edge, 360 deg at the right edge
+	const double amp_min = 135.0, amp_max = 360.0;
+#define AMP_X(a)   (left_margin + ((a) - amp_min) / (amp_max - amp_min) * (strip_width - 1))
+	// The beat position runs from right to left, so that a fast watch (positive
+	// rate) leans to the right with the newest beats at the bottom
+#define RULER_X(t) (right_margin - (t) * strip_width / window_ms)
+
+	// Ruler in ms: the smallest round step that gives at most 10 divisions
+	static const double ruler_steps[] = {0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 0};
+	double ruler = 100;
+	for(i = 0; ruler_steps[i]; i++) {
+		if(window_ms / ruler_steps[i] <= 10) {
+			ruler = ruler_steps[i];
+			break;
+		}
+	}
+
+	char s[32];
+	int k, a;
+	cairo_text_extents_t extents;
 
 	double now = sweep*ceil(time/sweep);
 	double ten_s = safe_sample_rate * 10 / sweep;
 	double last_line = fmod(now/sweep, ten_s);
 	int last_tenth = floor(now/(sweep*ten_s));
-	for(i=0;;i++) {
-		double y = 0.5 + round(last_line + i*ten_s);
-		if(y > height) break;
-		cairo_move_to(c, .5, y);
-		cairo_line_to(c, width-.5, y);
-		cairo_set_source(c, (last_tenth-i)%6 ? green : red);
+
+	// Everything below is clipped to the data area
+	cairo_save(c);
+	cairo_rectangle(c, 0, plot_top, width, plot_bottom - plot_top);
+	cairo_clip(c);
+	cairo_set_line_width(c, 1);
+
+	// Vertical grid: ruler lines (white, dotted) and amplitude lines (green, dotted)
+	for(k = 1; k * ruler < window_ms - ruler / 2; k++) {
+		double x = round(RULER_X(k * ruler)) + .5;
+		cairo_move_to(c, x, plot_top);
+		cairo_line_to(c, x, plot_bottom);
+	}
+	set_axis_style(c, COL_AXIS, 0);
+	cairo_stroke(c);
+	if(!snst->calibrate) {
+		for(a = 150; a <= 350; a += 50) {
+			double x = round(AMP_X(a)) + .5;
+			cairo_move_to(c, x, plot_top);
+			cairo_line_to(c, x, plot_bottom);
+		}
+		set_axis_style(c, COL_AMP, 0);
 		cairo_stroke(c);
 	}
 
+	// Window edges: a beat leaving one edge comes back at the other
+	cairo_move_to(c, left_margin + .5, plot_top);
+	cairo_line_to(c, left_margin + .5, plot_bottom);
+	cairo_move_to(c, right_margin + .5, plot_top);
+	cairo_line_to(c, right_margin + .5, plot_bottom);
+	set_axis_style(c, COL_AXIS, 1);
+	cairo_stroke(c);
+
+	// Time marks move with the data: dotted every 10 s, solid every minute,
+	// labelled with the time since the start of the measurement
+	cairo_set_font_size(c, font * 0.8);
+	for(i=0;;i++) {
+		int tenth = last_tenth - i;
+		double y = plot_bottom - 0.5 - round(last_line + i*ten_s);
+		if(y < plot_top || tenth < 0) break;
+		cairo_move_to(c, .5, y);
+		cairo_line_to(c, width-.5, y);
+		set_axis_style(c, COL_AXIS, !(tenth % 6));
+		cairo_stroke(c);
+		set_dotted(c, 0);
+
+		snprintf(s, sizeof(s), "%d:%02d", tenth / 6, (tenth % 6) * 10);
+		cairo_text_extents(c, s, &extents);
+		set_color(c, COL_AXIS, 0.7);
+		cairo_move_to(c, fmax(1, left_margin - extents.x_advance - 3), y - 2);
+		cairo_show_text(c, s);
+	}
+
+	// Rate guide: lines with the slope of the measured rate (in calibration, of
+	// the current cal value), dashed in the reference colour. The trace should
+	// run parallel to them. Age is counted in rows from the bottom edge.
+	cairo_set_line_width(c, 1.2);
+	slope *= -strip_width; // mirrored together with the beat dots, see below
+	if(slope <= 2 && slope >= -2) {
+		static const double guide_dashes[2] = {6, 4};
+		const double rows = plot_bottom;
+		cairo_set_dash(c, guide_dashes, 2, 0);
+		for(i=0; i<4; i++) {
+			double y = 0;
+			cairo_move_to(c, (double)width * (i+.5) / 4, plot_bottom);
+			for(;;) {
+				double x = y * slope + (double)width * (i+.5) / 4;
+				x = fmod(x, width);
+				if(x < 0) x += width;
+				double nx = x + slope * (rows - y);
+				if(nx >= 0 && nx <= width) {
+					cairo_line_to(c, nx, plot_bottom - rows);
+					break;
+				} else {
+					double d = slope > 0 ? width - x : x;
+					y += d / fabs(slope);
+					cairo_line_to(c, slope > 0 ? width : 0, plot_bottom - y);
+					y += 1;
+					if(y > rows) break;
+					cairo_move_to(c, slope > 0 ? 0 : width, plot_bottom - y);
+				}
+			}
+		}
+		set_color(c, COL_RATE, 0.9);
+		cairo_stroke(c);
+		set_dotted(c, 0);
+	}
+
+	// Amplitude history (green); higher amplitude is further right, like in the tic and toc panels
 	if(!snst->calibrate && snst->amps_count && snst->amps && snst->amps_time) {
 		int path_started = 0;
-		cairo_set_source(c, yellow);
+		cairo_set_line_width(c, 1.5);
 		for(i = snst->amps_wp;;) {
 			if(!snst->amps_time[i]) break;
 			double event_age = now - snst->amps_time[i];
 			double row = floor(event_age / sweep);
-			if(row >= height) break;
+			if(row >= plot_bottom) break;
 
 			double amp_deg = snst->la * snst->amps[i];
-			double amp_norm = (amp_deg - 135.0) / (360.0 - 135.0);
+			double amp_norm = (amp_deg - amp_min) / (amp_max - amp_min);
 			if(amp_norm < 0) amp_norm = 0;
 			if(amp_norm > 1) amp_norm = 1;
 
-			double column = right_margin - amp_norm * (strip_width - 1);
+			double column = left_margin + amp_norm * (strip_width - 1);
+			double y = plot_bottom - row - .5;
 			if(!path_started) {
-				cairo_move_to(c, column, row);
+				cairo_move_to(c, column, y);
 				path_started = 1;
 			} else {
-				cairo_line_to(c, column, row);
+				cairo_line_to(c, column, y);
 			}
 
 			if(--i < 0) i = snst->amps_count - 1;
 			if(i == snst->amps_wp) break;
 		}
-		if(path_started)
+		if(path_started) {
+			set_signal_color(c, COL_AMP, stopped);
 			cairo_stroke(c);
+		}
 	}
 
+	// Beats: one dot per beat, tic in grey and toc in gold (neutral white for
+	// the reference ticks of a calibration). Faded when the signal is lost.
 	for(i = snst->events_wp; valid_events_wp;) {
 		if(!snst->events_count || !snst->events[i]) break;
 		double event = now - snst->events[i] + snst->trace_centering + sweep * PAPERSTRIP_MARGIN / (2 * zoom_factor);
 		int column = floor(fmod(event, (sweep / zoom_factor)) * strip_width / (sweep / zoom_factor));
 		int row = floor(event / sweep);
-		if(row >= height) break;
+		if(row >= plot_bottom) break;
 
-		if(stopped) {
-			cairo_set_source(c, yellow);
-		} else if(snst->events_tictoc) {
-			cairo_set_source(c, snst->events_tictoc[i] ? white : goldenrod);
-		} else {
-			cairo_set_source(c, white);
-		}
+		struct color dot = COL_WAVE;
+		if(!snst->calibrate && snst->events_tictoc)
+			dot = snst->events_tictoc[i] ? COL_TIC : COL_TOC;
+		set_signal_color(c, dot, stopped);
 
-		cairo_move_to(c,column,row);
-		cairo_line_to(c,column+1,row);
-		cairo_line_to(c,column+1,row+1);
-		cairo_line_to(c,column,row+1);
-		cairo_line_to(c,column,row);
+		// Mirrored horizontally: later in the beat is further left, so a
+		// fast watch (positive rate) leans right, parallel to the rate guide
+		double y = plot_bottom - 1 - row;
+		cairo_rectangle(c, width - 1 - column, y, 1, 1);
 		cairo_fill(c);
 		if(column < width - strip_width && row > 0) {
-			column += strip_width;
-			row -= 1;
-			cairo_move_to(c,column,row);
-			cairo_line_to(c,column+1,row);
-			cairo_line_to(c,column+1,row+1);
-			cairo_line_to(c,column,row+1);
-			cairo_line_to(c,column,row);
+			// Repeat in the left margin, one row newer, so that the trace
+			// looks continuous across the window edge
+			cairo_rectangle(c, width - 1 - column - strip_width, y + 1, 1, 1);
 			cairo_fill(c);
 		}
 		if(--i < 0) i = snst->events_count - 1;
 		if(i == snst->events_wp) break;
 	}
+	cairo_restore(c);
 
-	cairo_set_source(c,white);
-	cairo_set_line_width(c,2);
-	cairo_move_to(c, left_margin + 3, height - 20.5);
-	cairo_line_to(c, right_margin - 3, height - 20.5);
-	cairo_stroke(c);
-	cairo_set_line_width(c,1);
-	cairo_move_to(c, left_margin + .5, height - 20.5);
-	cairo_line_to(c, left_margin + 5.5, height - 15.5);
-	cairo_line_to(c, left_margin + 5.5, height - 25.5);
-	cairo_line_to(c, left_margin + .5, height - 20.5);
-	cairo_fill(c);
-	cairo_move_to(c, right_margin + .5, height - 20.5);
-	cairo_line_to(c, right_margin - 4.5, height - 15.5);
-	cairo_line_to(c, right_margin - 4.5, height - 25.5);
-	cairo_line_to(c, right_margin + .5, height - 20.5);
-	cairo_fill(c);
+	// Scales on top: amplitude in degrees (green), position in the beat in ms (white)
+	cairo_set_line_width(c, 1);
+	cairo_set_font_size(c, font);
+	const double y_amp = font + 2;
+	const double y_ms = scale_rows == 2 ? 2 * font + 6 : font + 2;
+	if(!snst->calibrate) {
+		set_color(c, COL_AMP, 1);
+		for(a = 150; a <= 350; a += 50) {
+			snprintf(s, sizeof(s), "%d\xC2\xB0", a);
+			cairo_text_extents(c, s, &extents);
+			cairo_move_to(c, AMP_X(a) - extents.x_advance / 2, y_amp);
+			cairo_show_text(c, s);
+		}
+	}
+	// The ruler counts from the right edge, so its unit goes where the numbers grow
+	cairo_text_extents(c, "ms", &extents);
+	double unit_x = font / 4;
+	double unit_end = unit_x + extents.x_advance;
+	cairo_set_source(c, white);
+	for(k = 0; k * ruler <= window_ms + 1e-9; k++) {
+		snprintf(s, sizeof(s), "%g", k * ruler);
+		cairo_text_extents(c, s, &extents);
+		double x = RULER_X(k * ruler) - extents.x_advance / 2;
+		if(x < unit_end + font / 2 || x + extents.x_advance > width) continue; // keep clear of the unit
+		cairo_move_to(c, x, y_ms);
+		cairo_show_text(c, s);
+	}
+	cairo_move_to(c, unit_x, y_ms);
+	cairo_show_text(c, "ms");
 
-	char s[100];
-	cairo_text_extents_t extents;
+	// Legend
+	cairo_set_font_size(c, font * 0.9);
+	double lx = left_margin;
+	const double ly = height - 5;
+	if(snst->calibrate) {
+		lx = legend_item(c, lx, ly, LEGEND_DOT, COL_WAVE, "reference tick");
+		lx = legend_item(c, lx, ly, LEGEND_DASH, COL_RATE, "current cal");
+	} else {
+		lx = legend_item(c, lx, ly, LEGEND_DOT, COL_TIC, "tic");
+		lx = legend_item(c, lx, ly, LEGEND_DOT, COL_TOC, "toc");
+		lx = legend_item(c, lx, ly, LEGEND_LINE, COL_AMP, "amplitude");
+		lx = legend_item(c, lx, ly, LEGEND_DASH, COL_RATE, "rate guide");
+	}
 
-	gtk_widget_get_allocation(gtk_widget_get_toplevel(widget), &temp);
-	int font = temp.width / 90;
-	if(font < 12)
-		font = 12;
-	cairo_set_font_size(c,font);
-
-	sprintf(s, "%.1f ms", snst->calibrate ?
-				1000. / zoom_factor :
-				3600000. / (safe_bph * zoom_factor));
-	cairo_text_extents(c,s,&extents);
-	cairo_move_to(c, (width - extents.x_advance)/2, height - 30);
-	cairo_show_text(c,s);
-
+#undef AMP_X
+#undef RULER_X
 	return FALSE;
 }
 
@@ -862,7 +1068,7 @@ static gboolean debug_draw_event(GtkWidget *widget, cairo_t *c, struct output_pa
 
 		draw_debug_graph(a,b,c,p,op->debug_drawing_area);
 
-		cairo_set_source(c,snst->is_old?yellow:white);
+		set_signal_color(c, COL_WAVE, snst->is_old);
 		cairo_stroke(c);
 	}
 
@@ -1115,6 +1321,8 @@ struct output_panel *init_output_panel(struct computer *comp, struct snapshot *s
 
 	op->computer = comp;
 	op->snst = snst;
+	op->guide_rate = 0;
+	op->guide_time = 0;
 
 	op->panel = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
 	gtk_container_set_border_width(GTK_CONTAINER(op->panel), border);
