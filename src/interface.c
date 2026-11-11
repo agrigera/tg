@@ -870,6 +870,22 @@ static void handle_snapshot(GtkButton *b, struct main_window *w)
 	add_new_tab(s, (char *)selected_watch(w), w);
 }
 
+/* Keyboard shortcut for the most frequent action: Ctrl+Space takes a snapshot.
+ * A chord is used because a plain key would clash with typing in the entries
+ * and with the focused button. It presses the button itself, so it is only
+ * available when the button is: real-time tab, measurable signal, not calibrating. */
+static gboolean handle_key_press(GtkWidget *widget, GdkEventKey *event, struct main_window *w)
+{
+	UNUSED(widget);
+	guint mods = event->state & gtk_accelerator_get_default_mod_mask();
+	if(mods == GDK_CONTROL_MASK && event->keyval == GDK_KEY_space) {
+		if(gtk_widget_get_visible(w->snapshot_button) && gtk_widget_get_sensitive(w->snapshot_button))
+			gtk_button_clicked(GTK_BUTTON(w->snapshot_button));
+		return TRUE;
+	}
+	return FALSE;
+}
+
 static void chooser_set_filters(GtkFileChooser *chooser)
 {
 	GtkFileFilter *tgj_filter = gtk_file_filter_new();
@@ -1129,6 +1145,7 @@ static void init_main_window(struct main_window *w)
 
 	gtk_container_set_border_width(GTK_CONTAINER(w->window), 10);
 	g_signal_connect(w->window, "delete_event", G_CALLBACK(delete_event), w);
+	g_signal_connect(w->window, "key-press-event", G_CALLBACK(handle_key_press), w);
 
 	gtk_window_set_title(GTK_WINDOW(w->window), PROGRAM_NAME " " VERSION);
 	gtk_window_set_icon_name (GTK_WINDOW(w->window), PACKAGE);
@@ -1309,6 +1326,12 @@ static void init_main_window(struct main_window *w)
 
 	// Snapshot button
 	w->snapshot_button = gtk_button_new_with_label("Take Snapshot");
+	gtk_widget_set_tooltip_text(w->snapshot_button,
+		"Keep the current\n"
+		"measurement in a\n"
+		"new tab.\n"
+		"\n"
+		"Shortcut: Ctrl+Space");
 	gtk_box_pack_start(GTK_BOX(hbox), w->snapshot_button, FALSE, FALSE, 0);
 	gtk_widget_set_sensitive(w->snapshot_button, FALSE);
 	g_signal_connect(w->snapshot_button, "clicked", G_CALLBACK(handle_snapshot), w);
