@@ -1230,6 +1230,22 @@ static void init_main_window(struct main_window *w)
 
 	// ... Light checkbox
 	GtkWidget *light_checkbox = gtk_check_menu_item_new_with_label("Light algorithm");
+	gtk_widget_set_tooltip_text(light_checkbox,
+		"Reduces CPU load, \n"
+		"for slow computers.\n"
+		"\n"
+		"It processes half of\n"
+		"the audio samples, \n"
+		"uses shorter analysis\n"
+		"windows and skips the\n"
+		"noise suppressor.\n"
+		"Results update faster,\n"
+		"but they are less stable\n"
+		"and more sensitive to \n"
+		"background noise.\n"
+		"Toggling this setting will\n"
+		"restart your measurement."
+		);
 	gtk_menu_shell_append(GTK_MENU_SHELL(command_menu), light_checkbox);
 	g_signal_connect(light_checkbox, "toggled", G_CALLBACK(handle_light), w);
 	gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(light_checkbox), w->is_light);
