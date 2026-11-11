@@ -242,6 +242,10 @@ struct main_window {
 	GtkApplication *app;
 
 	GtkWidget *window;
+	GtkWidget *watch_combo_box;
+	GtkWidget *watch_save_button;
+	GtkWidget *watch_delete_button;
+	int watch_updating; // set while the UI is being changed programmatically
 	GtkWidget *bph_combo_box;
 	GtkWidget *audio_combo_box;
 	GtkWidget *sample_rate_combo_box;
@@ -307,6 +311,14 @@ void load_config(struct main_window *w);
 void save_config(struct main_window *w);
 void save_on_change(struct main_window *w);
 void close_config(struct main_window *w);
+
+#define WATCH_NAME_MAX 64 // characters
+int watch_name_valid(const char *name);
+int watch_exists(struct main_window *w, const char *name);
+int get_watch(struct main_window *w, const char *name, int *bph, double *la);
+gchar **list_watches(struct main_window *w); // free with g_strfreev
+void set_watch(struct main_window *w, const char *name, int bph, double la);
+void delete_watch(struct main_window *w, const char *name);
 
 /* serializer.c */
 int write_file(FILE *f, struct snapshot **s, char **names, uint64_t cnt);

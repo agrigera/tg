@@ -78,6 +78,7 @@ static void refresh_results(struct main_window *w)
 }
 
 static void kill_computer(struct main_window *w);
+static void watch_sync_selection(struct main_window *w);
 
 static void handle_bph_change(GtkComboBox *b, struct main_window *w)
 {
@@ -93,6 +94,7 @@ static void handle_bph_change(GtkComboBox *b, struct main_window *w)
 		w->bph = bph;
 		refresh_results(w);
 		gtk_widget_queue_draw(w->notebook);
+		watch_sync_selection(w);
 	}
 }
 
@@ -104,6 +106,255 @@ static void handle_la_change(GtkSpinButton *b, struct main_window *w)
 	w->la = la;
 	refresh_results(w);
 	gtk_widget_queue_draw(w->notebook);
+	watch_sync_selection(w);
+}
+
+/* Show bph in the bph combo box: a preset entry, "guess" (0) or custom text */
+static void set_bph_combo(struct main_window *w, int bph)
+{
+	int i, current = 0;
+	for(i = 0; preset_bph[i]; i++) {
+		if(bph == preset_bph[i]) {
+			current = i+1;
+			break;
+		}
+	}
+	if(current || bph == 0)
+		gtk_combo_box_set_active(GTK_COMBO_BOX(w->bph_combo_box), current);
+	else {
+		char s[32];
+		sprintf(s,"%d",bph);
+		GtkEntry *e = GTK_ENTRY(gtk_bin_get_child(GTK_BIN(w->bph_combo_box)));
+		gtk_entry_set_text(e,s);
+	}
+}
+
+/* ---- Saved watches (bph + lift angle presets stored in the config file) ---- */
+
+#define WATCH_NONE_LABEL "(none)"
+
+/* Name of the watch selected in the combo box, or NULL for "(none)" */
+static const char *selected_watch(struct main_window *w)
+{
+	const gchar *id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(w->watch_combo_box));
+	return id && *id ? id : NULL;
+}
+
+static void watch_update_buttons(struct main_window *w)
+{
+	gtk_widget_set_sensitive(w->watch_combo_box, w->controls_active);
+	gtk_widget_set_sensitive(w->watch_save_button, w->controls_active);
+	gtk_widget_set_sensitive(w->watch_delete_button, w->controls_active && selected_watch(w));
+}
+
+/* Select a watch by name without applying it (NULL selects "(none)") */
+static void watch_select(struct main_window *w, const char *name)
+{
+	w->watch_updating++;
+	if(!name || !gtk_combo_box_set_active_id(GTK_COMBO_BOX(w->watch_combo_box), name))
+		gtk_combo_box_set_active_id(GTK_COMBO_BOX(w->watch_combo_box), "");
+	w->watch_updating--;
+	watch_update_buttons(w);
+}
+
+/* The last watch the user picked, kept in [tg] so it survives restarts */
+static gchar *watch_remembered(struct main_window *w)
+{
+	return g_key_file_get_string(w->config_file, "tg", "watch", NULL);
+}
+
+static void watch_remember(struct main_window *w, const char *name)
+{
+	if(name)
+		g_key_file_set_string(w->config_file, "tg", "watch", name);
+	else
+		g_key_file_remove_key(w->config_file, "tg", "watch", NULL);
+}
+
+static int watch_matches(struct main_window *w, const char *name, int bph, double la)
+{
+	int b;
+	double l;
+	if(!name || get_watch(w, name, &b, &l)) return 0;
+	return b == bph && fabs(l - la) < 0.05;
+}
+
+/* Rebuild the combo box from the config file and select `name` */
+static void watch_populate(struct main_window *w, const char *name)
+{
+	GtkComboBoxText *c = GTK_COMBO_BOX_TEXT(w->watch_combo_box);
+	w->watch_updating++;
+	gtk_combo_box_text_remove_all(c);
+	gtk_combo_box_text_append(c, "", WATCH_NONE_LABEL);
+	gchar **names = list_watches(w);
+	int i;
+	for(i = 0; names[i]; i++)
+		gtk_combo_box_text_append(c, names[i], names[i]);
+	g_strfreev(names);
+	w->watch_updating--;
+	watch_select(w, name);
+}
+
+/* Select the remembered watch if the current bph/lift angle still match it */
+static void watch_restore(struct main_window *w)
+{
+	gchar *name = watch_remembered(w);
+	watch_select(w, watch_matches(w, name, w->bph, w->la) ? name : NULL);
+	g_free(name);
+}
+
+/* After a manual bph/lift angle edit, drop the selection if it no longer matches */
+static void watch_sync_selection(struct main_window *w)
+{
+	if(w->watch_updating) return;
+	const char *name = selected_watch(w);
+	if(name && !watch_matches(w, name, w->bph, w->la))
+		watch_select(w, NULL);
+}
+
+static void watch_apply(struct main_window *w, int bph, double la)
+{
+	w->watch_updating++;
+	set_bph_combo(w, bph);
+	gtk_spin_button_set_value(GTK_SPIN_BUTTON(w->la_spin_button), la);
+	w->watch_updating--;
+
+	w->bph = bph;
+	w->la = la;
+	refresh_results(w);
+	gtk_widget_queue_draw(w->notebook);
+}
+
+static void handle_watch_change(GtkComboBox *b, struct main_window *w)
+{
+	UNUSED(b);
+	if(w->watch_updating || !w->controls_active) return;
+	watch_update_buttons(w);
+
+	const char *name = selected_watch(w);
+	if(!name) {
+		watch_remember(w, NULL);
+		return;
+	}
+
+	int bph;
+	double la;
+	if(get_watch(w, name, &bph, &la)) {
+		watch_populate(w, NULL);
+		return;
+	}
+	watch_remember(w, name);
+	watch_apply(w, bph, la);
+}
+
+static void watch_message(struct main_window *w, GtkMessageType type, const char *text)
+{
+	GtkWidget *d = gtk_message_dialog_new(GTK_WINDOW(w->window),
+			GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+			type, GTK_BUTTONS_CLOSE, "%s", text);
+	gtk_dialog_run(GTK_DIALOG(d));
+	gtk_widget_destroy(d);
+}
+
+static int watch_confirm(struct main_window *w, const char *text)
+{
+	GtkWidget *d = gtk_message_dialog_new(GTK_WINDOW(w->window),
+			GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+			GTK_MESSAGE_QUESTION, GTK_BUTTONS_YES_NO, "%s", text);
+	int ret = gtk_dialog_run(GTK_DIALOG(d)) == GTK_RESPONSE_YES;
+	gtk_widget_destroy(d);
+	return ret;
+}
+
+static void handle_watch_save(GtkButton *b, struct main_window *w)
+{
+	UNUSED(b);
+	if(!w->controls_active) return;
+
+	const char *sel = selected_watch(w);
+	gchar *prefill = sel ? g_strdup(sel) : watch_remembered(w);
+
+	GtkWidget *dialog = gtk_dialog_new_with_buttons("Save watch", GTK_WINDOW(w->window),
+			GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+			"_Cancel", GTK_RESPONSE_CANCEL,
+			"_Save", GTK_RESPONSE_ACCEPT,
+			NULL);
+	gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_ACCEPT);
+
+	GtkWidget *area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+	gtk_container_set_border_width(GTK_CONTAINER(area), 10);
+	gtk_box_set_spacing(GTK_BOX(area), 6);
+
+	gchar *bph_text = w->bph ? g_strdup_printf("%d bph", w->bph) : g_strdup("bph guess");
+	gchar *text = g_strdup_printf("Save the current settings (%s, lift angle %g deg) as:", bph_text, w->la);
+	GtkWidget *label = gtk_label_new(text);
+	gtk_label_set_xalign(GTK_LABEL(label), 0);
+	gtk_box_pack_start(GTK_BOX(area), label, FALSE, FALSE, 0);
+	g_free(text);
+	g_free(bph_text);
+
+	GtkWidget *entry = gtk_entry_new();
+	gtk_entry_set_max_length(GTK_ENTRY(entry), WATCH_NAME_MAX);
+	gtk_entry_set_activates_default(GTK_ENTRY(entry), TRUE);
+	gtk_entry_set_placeholder_text(GTK_ENTRY(entry), "Watch name");
+	if(prefill) gtk_entry_set_text(GTK_ENTRY(entry), prefill);
+	gtk_box_pack_start(GTK_BOX(area), entry, FALSE, FALSE, 0);
+	g_free(prefill);
+
+	gtk_widget_show_all(area);
+	gtk_widget_grab_focus(entry);
+
+	gchar *name = NULL;
+	while(gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+		gchar *t = g_strstrip(g_strdup(gtk_entry_get_text(GTK_ENTRY(entry))));
+		if(!watch_name_valid(t)) {
+			gchar *msg = g_strdup_printf("Please enter a name of up to %d characters, without '[' or ']'.", WATCH_NAME_MAX);
+			watch_message(w, GTK_MESSAGE_ERROR, msg);
+			g_free(msg);
+			g_free(t);
+			continue;
+		}
+		if(watch_exists(w, t)) {
+			gchar *msg = g_strdup_printf("A watch named \"%s\" already exists.\nReplace it with the current settings?", t);
+			int ok = watch_confirm(w, msg);
+			g_free(msg);
+			if(!ok) {
+				g_free(t);
+				continue;
+			}
+		}
+		name = t;
+		break;
+	}
+	gtk_widget_destroy(dialog);
+
+	if(name) {
+		watch_remember(w, name);
+		set_watch(w, name, w->bph, w->la); // also writes the config file
+		watch_populate(w, name);
+		g_free(name);
+	}
+}
+
+static void handle_watch_delete(GtkButton *b, struct main_window *w)
+{
+	UNUSED(b);
+	if(!w->controls_active) return;
+	const char *sel = selected_watch(w);
+	if(!sel) return;
+
+	gchar *name = g_strdup(sel);
+	gchar *msg = g_strdup_printf("Delete the saved watch \"%s\"?\nThe current bph and lift angle are kept.", name);
+	if(watch_confirm(w, msg)) {
+		gchar *remembered = watch_remembered(w);
+		if(remembered && !strcmp(remembered, name))
+			watch_remember(w, NULL);
+		g_free(remembered);
+		delete_watch(w, name); // also writes the config file
+		watch_populate(w, NULL);
+	}
+	g_free(msg);
+	g_free(name);
 }
 
 static void handle_cal_change(GtkSpinButton *b, struct main_window *w)
@@ -349,6 +600,7 @@ static void handle_light(GtkCheckMenuItem *b, struct main_window *w)
 static void controls_active(struct main_window *w, int active)
 {
 	w->controls_active = active;
+	watch_update_buttons(w);
 	gtk_widget_set_sensitive(w->bph_combo_box, active);
 	gtk_widget_set_sensitive(w->audio_combo_box, active);
 	gtk_widget_set_sensitive(w->sample_rate_combo_box, active);
@@ -398,25 +650,17 @@ static void handle_tab_changed(GtkNotebook *nbk, GtkWidget *panel, guint x, stru
 		snap = w->active_snapshot;
 	}
 
-	int i,current = 0;
-	for(i = 0; preset_bph[i]; i++) {
-		if(bph == preset_bph[i]) {
-			current = i+1;
-			break;
-		}
-	}
-	if(current || bph == 0)
-		gtk_combo_box_set_active(GTK_COMBO_BOX(w->bph_combo_box), current);
-	else {
-		char s[32];
-		sprintf(s,"%d",bph);
-		GtkEntry *e = GTK_ENTRY(gtk_bin_get_child(GTK_BIN(w->bph_combo_box)));
-		gtk_entry_set_text(e,s);
-	}
+	set_bph_combo(w, bph);
 
 	gtk_spin_button_set_value(GTK_SPIN_BUTTON(w->la_spin_button), la);
 	gtk_spin_button_set_value(GTK_SPIN_BUTTON(w->cal_spin_button), cal);
 	gtk_widget_set_sensitive(w->save_item, !snap->calibrate && snap->pb);
+
+	// Snapshot tabs show their own bph/la, so no saved watch is selected there
+	if(op)
+		watch_select(w, NULL);
+	else
+		watch_restore(w);
 }
 
 static void handle_tab_closed(GtkNotebook *nbk, GtkWidget *panel, guint x, struct main_window *w)
@@ -791,8 +1035,21 @@ static void init_main_window(struct main_window *w)
 	GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
 	gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 0);
 
+	// Saved watch selector (populated once bph and lift angle widgets exist)
+	GtkWidget *label = gtk_label_new("watch");
+	gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
+	w->watch_combo_box = gtk_combo_box_text_new();
+	gtk_widget_set_tooltip_text(w->watch_combo_box, "Saved watches (bph and lift angle)");
+	gtk_box_pack_start(GTK_BOX(hbox), w->watch_combo_box, FALSE, FALSE, 0);
+	w->watch_save_button = gtk_button_new_with_label("Save");
+	gtk_widget_set_tooltip_text(w->watch_save_button, "Save the current bph and lift angle as a watch");
+	gtk_box_pack_start(GTK_BOX(hbox), w->watch_save_button, FALSE, FALSE, 0);
+	w->watch_delete_button = gtk_button_new_with_label("Delete");
+	gtk_widget_set_tooltip_text(w->watch_delete_button, "Delete the selected watch");
+	gtk_box_pack_start(GTK_BOX(hbox), w->watch_delete_button, FALSE, FALSE, 0);
+
 	// BPH label
-	GtkWidget *label = gtk_label_new("bph");
+	label = gtk_label_new("bph");
 	gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
 
 	// BPH combo box
@@ -826,6 +1083,13 @@ static void init_main_window(struct main_window *w)
 	gtk_box_pack_start(GTK_BOX(hbox), w->la_spin_button, FALSE, FALSE, 0);
 	gtk_spin_button_set_value(GTK_SPIN_BUTTON(w->la_spin_button), w->la);
 	g_signal_connect(w->la_spin_button, "value_changed", G_CALLBACK(handle_la_change), w);
+
+	// Fill the saved watch selector and hook it up
+	g_signal_connect(w->watch_combo_box, "changed", G_CALLBACK(handle_watch_change), w);
+	g_signal_connect(w->watch_save_button, "clicked", G_CALLBACK(handle_watch_save), w);
+	g_signal_connect(w->watch_delete_button, "clicked", G_CALLBACK(handle_watch_delete), w);
+	watch_populate(w, NULL);
+	watch_restore(w);
 
 	// Separator between watch settings and audio/computer settings
 	gtk_box_pack_start(GTK_BOX(hbox), gtk_separator_new(GTK_ORIENTATION_VERTICAL), FALSE, FALSE, 0);
@@ -1080,6 +1344,7 @@ static void start_interface(GApplication* app, void *p)
 	w->nominal_sr = PA_SAMPLE_RATE;
 	w->audio_device = AUDIO_DEVICE_DEFAULT;
 	w->restart_audio = 0;
+	w->watch_updating = 0;
 
 	load_config(w);
 	set_audio_input_device(w->audio_device);
