@@ -821,6 +821,15 @@ static void init_main_window(struct main_window *w)
 	label = gtk_label_new("lift angle");
 	gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
 
+	// Lift angle spin button
+	w->la_spin_button = gtk_spin_button_new_with_range(MIN_LA, MAX_LA, 1);
+	gtk_box_pack_start(GTK_BOX(hbox), w->la_spin_button, FALSE, FALSE, 0);
+	gtk_spin_button_set_value(GTK_SPIN_BUTTON(w->la_spin_button), w->la);
+	g_signal_connect(w->la_spin_button, "value_changed", G_CALLBACK(handle_la_change), w);
+
+	// Separator between watch settings and audio/computer settings
+	gtk_box_pack_start(GTK_BOX(hbox), gtk_separator_new(GTK_ORIENTATION_VERTICAL), FALSE, FALSE, 0);
+
 	// Audio input label
 	label = gtk_label_new("audio");
 	gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
@@ -885,12 +894,6 @@ static void init_main_window(struct main_window *w)
 			gtk_combo_box_set_active(GTK_COMBO_BOX(w->sample_rate_combo_box), 2);
 	}
 	g_signal_connect(w->sample_rate_combo_box, "changed", G_CALLBACK(handle_sample_rate_change), w);
-
-	// Lift angle spin button
-	w->la_spin_button = gtk_spin_button_new_with_range(MIN_LA, MAX_LA, 1);
-	gtk_box_pack_start(GTK_BOX(hbox), w->la_spin_button, FALSE, FALSE, 0);
-	gtk_spin_button_set_value(GTK_SPIN_BUTTON(w->la_spin_button), w->la);
-	g_signal_connect(w->la_spin_button, "value_changed", G_CALLBACK(handle_la_change), w);
 
 	// Calibration label
 	label = gtk_label_new("cal");
