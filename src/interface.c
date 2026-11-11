@@ -142,9 +142,11 @@ static const char *selected_watch(struct main_window *w)
 
 static void watch_update_buttons(struct main_window *w)
 {
-	gtk_widget_set_sensitive(w->watch_combo_box, w->controls_active);
-	gtk_widget_set_sensitive(w->watch_save_button, w->controls_active);
-	gtk_widget_set_sensitive(w->watch_delete_button, w->controls_active && selected_watch(w));
+	// Watches change bph and lift angle, which are locked while calibrating
+	int enabled = w->controls_active && !w->calibrate;
+	gtk_widget_set_sensitive(w->watch_combo_box, enabled);
+	gtk_widget_set_sensitive(w->watch_save_button, enabled);
+	gtk_widget_set_sensitive(w->watch_delete_button, enabled && selected_watch(w));
 }
 
 /* Select a watch by name without applying it (NULL selects "(none)") */
@@ -579,13 +581,53 @@ static guint kick_computer(struct main_window *w)
 	}
 }
 
-static void handle_calibrate(GtkCheckMenuItem *b, struct main_window *w)
+/* Menu items whose availability depends on the program state (e.g. "Save all
+ * snapshots" only with snapshots open) remember the wanted state here, so that
+ * calibration can lock them and later restore them correctly. */
+static void set_menu_item_enabled(struct main_window *w, GtkWidget *item, int enabled)
 {
-	int button_state = gtk_check_menu_item_get_active(b) == TRUE;
-	if(button_state != w->calibrate) {
-		w->calibrate = button_state;
-		recompute(w);
-	}
+	g_object_set_data(G_OBJECT(item), "enabled-wanted", GINT_TO_POINTER(enabled ? 1 : 2));
+	gtk_widget_set_sensitive(item, enabled && !w->calibrate);
+}
+
+static int menu_item_wanted(GtkWidget *item)
+{
+	return GPOINTER_TO_INT(g_object_get_data(G_OBJECT(item), "enabled-wanted")) != 2;
+}
+
+/* Apply widget sensitivity from controls_active (real-time tab shown) and calibrate */
+static void update_sensitivity(struct main_window *w)
+{
+	int live = w->controls_active;
+	int settings = live && !w->calibrate;
+
+	watch_update_buttons(w);
+	gtk_widget_set_sensitive(w->bph_combo_box, settings);
+	gtk_widget_set_sensitive(w->la_spin_button, settings);
+	gtk_widget_set_sensitive(w->cal_spin_button, settings);
+	// Changing input or rate would restart audio and invalidate the calibration
+	gtk_widget_set_sensitive(w->audio_combo_box, settings);
+	gtk_widget_set_sensitive(w->sample_rate_combo_box, settings);
+
+	// Always allow stopping a running calibration, whichever tab is shown
+	gtk_widget_set_sensitive(w->cal_button, live || w->calibrate);
+	gtk_menu_item_set_label(GTK_MENU_ITEM(w->cal_button),
+			w->calibrate ? "Stop calibration" : "Start calibration");
+
+	// Other menu entries are locked while calibrating (Quit stays available)
+	gtk_widget_set_sensitive(w->open_item, !w->calibrate);
+	gtk_widget_set_sensitive(w->light_item, !w->calibrate);
+	gtk_widget_set_sensitive(w->save_item, menu_item_wanted(w->save_item) && !w->calibrate);
+	gtk_widget_set_sensitive(w->save_all_item, menu_item_wanted(w->save_all_item) && !w->calibrate);
+	gtk_widget_set_sensitive(w->close_all_item, menu_item_wanted(w->close_all_item) && !w->calibrate);
+}
+
+static void handle_calibrate(GtkMenuItem *b, struct main_window *w)
+{
+	UNUSED(b);
+	w->calibrate = !w->calibrate;
+	update_sensitivity(w);
+	recompute(w);
 }
 
 static void handle_light(GtkCheckMenuItem *b, struct main_window *w)
@@ -600,13 +642,7 @@ static void handle_light(GtkCheckMenuItem *b, struct main_window *w)
 static void controls_active(struct main_window *w, int active)
 {
 	w->controls_active = active;
-	watch_update_buttons(w);
-	gtk_widget_set_sensitive(w->bph_combo_box, active);
-	gtk_widget_set_sensitive(w->audio_combo_box, active);
-	gtk_widget_set_sensitive(w->sample_rate_combo_box, active);
-	gtk_widget_set_sensitive(w->la_spin_button, active);
-	gtk_widget_set_sensitive(w->cal_spin_button, active);
-	gtk_widget_set_sensitive(w->cal_button, active);
+	update_sensitivity(w);
 	if(active) {
 		gtk_widget_show(w->snapshot_button);
 		gtk_widget_hide(w->snapshot_name);
@@ -654,7 +690,7 @@ static void handle_tab_changed(GtkNotebook *nbk, GtkWidget *panel, guint x, stru
 
 	gtk_spin_button_set_value(GTK_SPIN_BUTTON(w->la_spin_button), la);
 	gtk_spin_button_set_value(GTK_SPIN_BUTTON(w->cal_spin_button), cal);
-	gtk_widget_set_sensitive(w->save_item, !snap->calibrate && snap->pb);
+	set_menu_item_enabled(w, w->save_item, !snap->calibrate && snap->pb);
 
 	// Snapshot tabs show their own bph/la, so no saved watch is selected there
 	if(op)
@@ -669,8 +705,8 @@ static void handle_tab_closed(GtkNotebook *nbk, GtkWidget *panel, guint x, struc
 	if(gtk_notebook_get_n_pages(nbk) == 1 && !w->zombie) {
 		gtk_notebook_set_show_tabs(GTK_NOTEBOOK(nbk), FALSE);
 		gtk_notebook_set_show_border(GTK_NOTEBOOK(nbk), FALSE);
-		gtk_widget_set_sensitive(w->save_all_item, FALSE);
-		gtk_widget_set_sensitive(w->close_all_item, FALSE);
+		set_menu_item_enabled(w, w->save_all_item, FALSE);
+		set_menu_item_enabled(w, w->close_all_item, FALSE);
 	}
 	// Now, are we sure that we are not going to segfault?
 	struct output_panel *op = g_object_get_data(G_OBJECT(panel), "op-pointer");
@@ -753,8 +789,8 @@ static void add_new_tab(struct snapshot *s, char *name, struct main_window *w)
 	gtk_notebook_set_show_border(GTK_NOTEBOOK(w->notebook), TRUE);
 	gtk_notebook_append_page(GTK_NOTEBOOK(w->notebook), op->panel, label);
 	gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(w->notebook), op->panel, TRUE);
-	gtk_widget_set_sensitive(w->save_all_item, TRUE);
-	gtk_widget_set_sensitive(w->close_all_item, TRUE);
+	set_menu_item_enabled(w, w->save_all_item, TRUE);
+	set_menu_item_enabled(w, w->close_all_item, TRUE);
 }
 
 static void handle_snapshot(GtkButton *b, struct main_window *w)
@@ -1210,26 +1246,27 @@ static void init_main_window(struct main_window *w)
 	gtk_box_pack_end(GTK_BOX(hbox), command_menu_button, FALSE, FALSE, 0);
 	
 	// ... Open
-	GtkWidget *open_item = gtk_menu_item_new_with_label("Open");
-	gtk_menu_shell_append(GTK_MENU_SHELL(command_menu), open_item);
-	g_signal_connect(open_item, "activate", G_CALLBACK(load), w);
+	w->open_item = gtk_menu_item_new_with_label("Open");
+	gtk_menu_shell_append(GTK_MENU_SHELL(command_menu), w->open_item);
+	g_signal_connect(w->open_item, "activate", G_CALLBACK(load), w);
 
 	// ... Save
 	w->save_item = gtk_menu_item_new_with_label("Save current display");
 	gtk_menu_shell_append(GTK_MENU_SHELL(command_menu), w->save_item);
 	g_signal_connect(w->save_item, "activate", G_CALLBACK(save_current), w);
-	gtk_widget_set_sensitive(w->save_item, FALSE);
+	set_menu_item_enabled(w, w->save_item, FALSE);
 
 	// ... Save all
 	w->save_all_item = gtk_menu_item_new_with_label("Save all snapshots");
 	gtk_menu_shell_append(GTK_MENU_SHELL(command_menu), w->save_all_item);
 	g_signal_connect(w->save_all_item, "activate", G_CALLBACK(save_all), w);
-	gtk_widget_set_sensitive(w->save_all_item, FALSE);
+	set_menu_item_enabled(w, w->save_all_item, FALSE);
 
 	gtk_menu_shell_append(GTK_MENU_SHELL(command_menu), gtk_separator_menu_item_new());
 
 	// ... Light checkbox
 	GtkWidget *light_checkbox = gtk_check_menu_item_new_with_label("Light algorithm");
+	w->light_item = light_checkbox;
 	gtk_widget_set_tooltip_text(light_checkbox,
 		"Reduces CPU load, \n"
 		"for slow computers.\n"
@@ -1250,10 +1287,21 @@ static void init_main_window(struct main_window *w)
 	g_signal_connect(light_checkbox, "toggled", G_CALLBACK(handle_light), w);
 	gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(light_checkbox), w->is_light);
 
-	// ... Calibrate checkbox
-	w->cal_button = gtk_check_menu_item_new_with_label("Calibrate");
+	// ... Start / Stop calibration (label switches with the state)
+	w->cal_button = gtk_menu_item_new_with_label("Start calibration");
+	gtk_widget_set_tooltip_text(w->cal_button,
+		"Measures the error of\n"
+		"your sound card clock,\n"
+		"using a quartz watch\n"
+		"ticking once per second\n"
+		"as reference.\n"
+		"\n"
+		"Takes about 15 minutes.\n"
+		"The result is stored\n"
+		"in the cal field."
+		);
 	gtk_menu_shell_append(GTK_MENU_SHELL(command_menu), w->cal_button);
-	g_signal_connect(w->cal_button, "toggled", G_CALLBACK(handle_calibrate), w);
+	g_signal_connect(w->cal_button, "activate", G_CALLBACK(handle_calibrate), w);
 
 	gtk_menu_shell_append(GTK_MENU_SHELL(command_menu), gtk_separator_menu_item_new());
 
@@ -1261,7 +1309,7 @@ static void init_main_window(struct main_window *w)
 	w->close_all_item = gtk_menu_item_new_with_label("Close all snapshots");
 	gtk_menu_shell_append(GTK_MENU_SHELL(command_menu), w->close_all_item);
 	g_signal_connect(w->close_all_item, "activate", G_CALLBACK(close_all), w);
-	gtk_widget_set_sensitive(w->close_all_item, FALSE);
+	set_menu_item_enabled(w, w->close_all_item, FALSE);
 
 	// ... Quit
 	GtkWidget *quit_item = gtk_menu_item_new_with_label("Quit");
@@ -1328,7 +1376,7 @@ guint refresh(struct main_window *w)
 	int photogenic = 0;
 	if(!g_object_get_data(G_OBJECT(panel), "op-pointer")) {
 		photogenic = !w->active_snapshot->calibrate && w->active_snapshot->pb;
-		gtk_widget_set_sensitive(w->save_item, photogenic);
+		set_menu_item_enabled(w, w->save_item, photogenic);
 		gtk_widget_queue_draw(w->notebook);
 	}
 	gtk_widget_set_sensitive(w->snapshot_button, photogenic);

@@ -255,8 +255,10 @@ struct main_window {
 	GtkWidget *snapshot_button;
 	GtkWidget *snapshot_name;
 	GtkWidget *snapshot_name_entry;
-	GtkWidget *cal_button;
+	GtkWidget *cal_button; // "Start calibration" / "Stop calibration" menu item
 	GtkWidget *notebook;
+	GtkWidget *open_item;
+	GtkWidget *light_item;
 	GtkWidget *save_item;
 	GtkWidget *save_all_item;
 	GtkWidget *close_all_item;
