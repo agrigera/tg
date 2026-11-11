@@ -184,14 +184,112 @@ static double print_number(cairo_t *c, double x, double y, char *s)
 	return x;
 }
 
+/* Two-row results table, like a hardware timegrapher: column titles on top,
+ * values below. The columns share the width to the right of the watch icon. */
+#define RESULT_COLUMNS 5
+#define RESULT_TITLE_ROW  0.22	// vertical centre of each row, as a fraction of the height
+#define RESULT_LINE       0.44
+#define RESULT_VALUE_ROW  0.72
+
+static void draw_results_table(cairo_t *c, double x0, double width, double height,
+		struct snapshot *snst, struct processing_buffers *p)
+{
+	static const char *titles[RESULT_COLUMNS] = {"RATE", "AMP.", "B.E.", "L.A.", "BEAT"};
+	char num[RESULT_COLUMNS][16];
+	const char *unit[RESULT_COLUMNS];
+	cairo_text_extents_t e;
+	int i;
+
+	if(width <= 0) return;
+
+	// Digits and unit are kept apart: digits go in fixed-width cells so that
+	// the values do not jitter, the unit follows them.
+	if(p) {
+		int rate = round(snst->rate);
+		snprintf(num[0], sizeof(num[0]), "%s%d", rate > 0 ? "+" : rate < 0 ? "-" : "", abs(rate));
+		unit[0] = "s/d";
+		if(snst->amp > 0) {
+			snprintf(num[1], sizeof(num[1]), "%.0f", snst->amp);
+			unit[1] = "\xC2\xB0";
+		} else {
+			strcpy(num[1], "---");
+			unit[1] = "";
+		}
+		snprintf(num[2], sizeof(num[2]), "%.1f", snst->be);
+		unit[2] = "ms";
+	} else {
+		for(i = 0; i < 3; i++) {
+			strcpy(num[i], "---");
+			unit[i] = "";
+		}
+	}
+	snprintf(num[3], sizeof(num[3]), "%.1f", snst->la);
+	unit[3] = "\xC2\xB0";
+	snprintf(num[4], sizeof(num[4]), "%d", snst->guessed_bph);
+	unit[4] = "";
+
+	// One font size for all values, reduced when the window is too narrow
+	double col_w = width / RESULT_COLUMNS;
+	double fv = OUTPUT_FONT * 0.85;
+	double cell, widest = 0;
+	cairo_set_font_size(c, fv);
+	cairo_text_extents(c, "0", &e);
+	cell = e.x_advance;
+	for(i = 0; i < RESULT_COLUMNS; i++) {
+		cairo_text_extents(c, unit[i], &e);
+		double wd = cell * strlen(num[i]) + e.x_advance;
+		if(wd > widest) widest = wd;
+	}
+	if(widest > col_w * 0.92) {
+		fv *= col_w * 0.92 / widest;
+		cairo_set_font_size(c, fv);
+		cairo_text_extents(c, "0", &e);
+		cell = e.x_advance;
+	}
+
+	// Column titles
+	cairo_save(c);
+	cairo_select_font_face(c, "sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+	cairo_set_font_size(c, fv * 0.5);
+	cairo_text_extents(c, "RATE", &e);
+	double y_title = RESULT_TITLE_ROW * height - e.y_bearing - e.height / 2;
+	cairo_set_source(c, white);
+	for(i = 0; i < RESULT_COLUMNS; i++) {
+		cairo_text_extents(c, titles[i], &e);
+		cairo_move_to(c, x0 + col_w * (i + 0.5) - e.x_advance / 2, y_title);
+		cairo_show_text(c, titles[i]);
+	}
+	cairo_restore(c);
+
+	// Line between titles and values
+	cairo_set_source_rgb(c, .55, .55, .55);
+	cairo_set_line_width(c, 1);
+	cairo_move_to(c, x0, round(RESULT_LINE * height) + .5);
+	cairo_line_to(c, x0 + width, round(RESULT_LINE * height) + .5);
+	cairo_stroke(c);
+
+	// Values; the measured ones are shown in yellow while the reading is stale
+	cairo_set_font_size(c, fv);
+	cairo_text_extents(c, "0", &e);
+	double y_value = RESULT_VALUE_ROW * height - e.y_bearing - e.height / 2;
+	for(i = 0; i < RESULT_COLUMNS; i++) {
+		cairo_set_source(c, i < 3 && p && snst->is_old ? yellow : white);
+		cairo_text_extents(c, unit[i], &e);
+		double digits = cell * strlen(num[i]);
+		double x = x0 + col_w * (i + 0.5) - (digits + e.x_advance) / 2;
+		x = print_number(c, x, y_value, num[i]);
+		print_s(c, x, y_value, (char *)unit[i]);
+	}
+}
+
 static gboolean output_draw_event(GtkWidget *widget, cairo_t *c, struct output_panel *op)
 {
-	UNUSED(widget);
 	cairo_init(c);
 
 	struct snapshot *snst = op->snst;
 	struct processing_buffers *p = snst->pb;
-	int old = snst->is_old;
+	int width = gtk_widget_get_allocated_width(widget);
+	int height = gtk_widget_get_allocated_height(widget);
 
 	double x = draw_watch_icon(c,snst->signal,snst->calibrate ? snst->signal==NSTEPS : snst->signal, snst->is_light);
 
@@ -251,53 +349,19 @@ static gboolean output_draw_event(GtkWidget *widget, cairo_t *c, struct output_p
 				break;
 		}
 	} else {
-		char outputs[8][20];
-		if(p) {
-			int rate = round(snst->rate);
-			double be = snst->be;
-			char rates[20];
-			sprintf(rates,"%s%d",rate > 0 ? "+" : rate < 0 ? "-" : "",abs(rate));
-			sprintf(outputs[0],"%4s",rates);
-			sprintf(outputs[2]," %4.1f",be);
-			if(snst->amp > 0)
-				sprintf(outputs[4]," %3.0f",snst->amp);
-			else
-				strcpy(outputs[4]," ---");
-		} else {
-			strcpy(outputs[0],"----");
-			strcpy(outputs[2]," ----");
-			strcpy(outputs[4]," ---");
-		}
-		sprintf(outputs[6]," %d",snst->guessed_bph);
-
-		strcpy(outputs[1]," s/d");
-		strcpy(outputs[3]," ms");
-		strcpy(outputs[5]," deg");
-		strcpy(outputs[7]," bph");
-
-		int i;
-		for(i=0; i<8; i++) {
-			if(i%2) {
-				cairo_set_source(c, white);
-				cairo_set_font_size(c, OUTPUT_FONT*2/3);
-				x = print_s(c,x,y,outputs[i]);
-			} else {
-				cairo_set_source(c, i > 4 || !p || !old ? white : yellow);
-				cairo_set_font_size(c, OUTPUT_FONT);
-				x = print_number(c,x,y,outputs[i]);
-			}
-		}
+		draw_results_table(c, x + 10, width - x - 20, height, snst, p);
 	}
 #ifdef DEBUG
 	{
+		// Frame rate, small and out of the way in the top right corner
 		static GTimer *timer = NULL;
 		if (!timer) timer = g_timer_new();
 		else {
 			char s[100];
-			sprintf(s,"  %.2f fps",1./g_timer_elapsed(timer, NULL));
+			sprintf(s,"%.2f fps",1./g_timer_elapsed(timer, NULL));
 			cairo_set_source(c, white);
-			cairo_set_font_size(c, OUTPUT_FONT);
-			x = print_s(c,x,y,s);
+			cairo_set_font_size(c, 12);
+			print_s(c, width - 90, 14, s);
 			g_timer_reset(timer);
 		}
 	}
@@ -942,7 +1006,7 @@ static void handle_right(GtkButton *b, struct output_panel *op)
 }
 
 /* While calibrating, the waveform panels are meaningless: show instructions instead */
-#define TITLE_RESULTS     "Results: rate, beat error, amplitude, beat rate"
+#define TITLE_RESULTS     "Results: rate, amplitude, beat error, lift angle, beat rate"
 #define TITLE_CAL_STATUS  "Calibration status and result"
 #define TITLE_PAPERSTRIP  "Paper strip: beat timing over time"
 #define TITLE_PAPERSTRIP_CAL "Paper strip: reference ticks"
