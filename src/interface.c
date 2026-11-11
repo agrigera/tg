@@ -79,6 +79,7 @@ static void refresh_results(struct main_window *w)
 
 static void kill_computer(struct main_window *w);
 static void watch_sync_selection(struct main_window *w);
+static void show_position(struct main_window *w, int pos);
 
 static void handle_bph_change(GtkComboBox *b, struct main_window *w)
 {
@@ -675,11 +676,13 @@ static void handle_tab_changed(GtkNotebook *nbk, GtkWidget *panel, guint x, stru
 	struct snapshot *snap;
 	if(op) {
 		gtk_entry_set_text(GTK_ENTRY(w->snapshot_name_entry), tab_name ? tab_name : "");
+		show_position(w, op->snst->position);
 		bph = op->snst->bph;
 		cal = op->snst->cal;
 		la = op->snst->la;
 		snap = op->snst;
 	} else {
+		show_position(w, w->live_position);
 		bph = w->bph;
 		cal = w->cal;
 		la = w->la;
@@ -720,16 +723,78 @@ static void handle_close_tab(GtkButton *b, struct output_panel *p)
 	gtk_widget_destroy(p->panel);
 }
 
+/* ---- Watch position of snapshots ---- */
+
+static const char *position_codes[POS_COUNT] = {
+	NULL, "DU", "DD", "CU", "CD", "CL", "CR"
+};
+
+static const char *position_labels[POS_COUNT] = {
+	"(not set)",
+	"Dial up (DU)",
+	"Dial down (DD)",
+	"Crown up (CU)",
+	"Crown down (CD)",
+	"Crown left (CL)",
+	"Crown right (CR)"
+};
+
+/* Tab title: "<name or Snapshot>" plus " (<position>)" when a position is set */
+static void update_tab_label(GtkWidget *panel)
+{
+	GtkLabel *label = g_object_get_data(G_OBJECT(panel), "tab-label");
+	struct output_panel *op = g_object_get_data(G_OBJECT(panel), "op-pointer");
+	if(!label || !op) return;
+
+	const char *name = g_object_get_data(G_OBJECT(panel), "tab-name");
+	if(!name) name = "Snapshot";
+	int pos = op->snst->position;
+
+	if(pos > POS_NONE && pos < POS_COUNT) {
+		gchar *text = g_strdup_printf("%s (%s)", name, position_codes[pos]);
+		gtk_label_set_text(label, text);
+		g_free(text);
+	} else
+		gtk_label_set_text(label, name);
+}
+
 static void handle_name_change(GtkEntry *e, struct main_window *w)
 {
 	int p = gtk_notebook_get_current_page(GTK_NOTEBOOK(w->notebook));
 	GtkWidget *panel = gtk_notebook_get_nth_page(GTK_NOTEBOOK(w->notebook), p);
-	GtkLabel *label = g_object_get_data(G_OBJECT(panel), "tab-label");
+	if(!g_object_get_data(G_OBJECT(panel), "op-pointer")) return; // real-time tab
 	free( g_object_get_data(G_OBJECT(panel), "tab-name") );
 	char *name = (char *)gtk_entry_get_text(e);
 	name = blank_string(name) ? NULL : strdup(name);
 	g_object_set_data(G_OBJECT(panel), "tab-name", name);
-	gtk_label_set_text(label, name ? name : "Snapshot");
+	update_tab_label(panel);
+}
+
+static void handle_position_change(GtkComboBox *b, struct main_window *w)
+{
+	if(w->position_updating) return;
+	int p = gtk_notebook_get_current_page(GTK_NOTEBOOK(w->notebook));
+	GtkWidget *panel = gtk_notebook_get_nth_page(GTK_NOTEBOOK(w->notebook), p);
+	struct output_panel *op = g_object_get_data(G_OBJECT(panel), "op-pointer");
+
+	int pos = gtk_combo_box_get_active(b);
+	if(pos < POS_NONE || pos >= POS_COUNT) pos = POS_NONE;
+	if(!op) {
+		// Real-time tab: remember it for the next snapshot
+		w->live_position = pos;
+		return;
+	}
+	op->snst->position = pos;
+	update_tab_label(panel);
+}
+
+/* Show a position in the combo box without triggering a change */
+static void show_position(struct main_window *w, int pos)
+{
+	if(pos < POS_NONE || pos >= POS_COUNT) pos = POS_NONE;
+	w->position_updating++;
+	gtk_combo_box_set_active(GTK_COMBO_BOX(w->snapshot_position_combo), pos);
+	w->position_updating--;
 }
 
 #ifdef WIN_XP
@@ -771,6 +836,7 @@ static GtkWidget *make_tab_label(char *name, struct output_panel *panel_to_close
 		g_object_set_data(G_OBJECT(panel_to_close->panel), "op-pointer", panel_to_close);
 		g_object_set_data(G_OBJECT(panel_to_close->panel), "tab-label", label);
 		g_object_set_data(G_OBJECT(panel_to_close->panel), "tab-name", name ? strdup(name) : NULL);
+		update_tab_label(panel_to_close->panel);
 	}
 
 	gtk_widget_show_all(hbox);
@@ -799,7 +865,9 @@ static void handle_snapshot(GtkButton *b, struct main_window *w)
 	if(w->active_snapshot->calibrate) return;
 	struct snapshot *s = snapshot_clone(w->active_snapshot);
 	s->timestamp = get_timestamp(s->is_light);
-	add_new_tab(s, NULL, w);
+	s->position = w->live_position; // can still be changed on the snapshot tab
+	// Name the snapshot after the selected watch, if any ("Snapshot" otherwise)
+	add_new_tab(s, (char *)selected_watch(w), w);
 }
 
 static void chooser_set_filters(GtkFileChooser *chooser)
@@ -1213,6 +1281,32 @@ static void init_main_window(struct main_window *w)
 	GtkWidget *empty = gtk_label_new("");
 	gtk_box_pack_start(GTK_BOX(hbox), empty, TRUE, FALSE, 0);
 
+	// Separator between audio/computer settings and the snapshot part
+	gtk_box_pack_start(GTK_BOX(hbox), gtk_separator_new(GTK_ORIENTATION_VERTICAL), FALSE, FALSE, 0);
+
+	// Watch position: on the real-time tab it is used for the next snapshot,
+	// on a snapshot tab it edits that snapshot (shown in the tab title, saved with it)
+	GtkWidget *position_label = gtk_label_new("Position:");
+	gtk_box_pack_start(GTK_BOX(hbox), position_label, FALSE, FALSE, 0);
+	w->snapshot_position_combo = gtk_combo_box_text_new();
+	int pos;
+	for(pos = POS_NONE; pos < POS_COUNT; pos++)
+		gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(w->snapshot_position_combo), position_labels[pos]);
+	gtk_combo_box_set_active(GTK_COMBO_BOX(w->snapshot_position_combo), w->live_position);
+	gtk_widget_set_tooltip_text(w->snapshot_position_combo,
+		"Position of the watch.\n"
+		"\n"
+		"Real time: applied to\n"
+		"the next snapshot.\n"
+		"Snapshot: changes the\n"
+		"position of this one.\n"
+		"\n"
+		"Shown in the tab title\n"
+		"and saved with the\n"
+		"snapshot.");
+	gtk_box_pack_start(GTK_BOX(hbox), w->snapshot_position_combo, FALSE, FALSE, 0);
+	g_signal_connect(w->snapshot_position_combo, "changed", G_CALLBACK(handle_position_change), w);
+
 	// Snapshot button
 	w->snapshot_button = gtk_button_new_with_label("Take Snapshot");
 	gtk_box_pack_start(GTK_BOX(hbox), w->snapshot_button, FALSE, FALSE, 0);
@@ -1409,6 +1503,8 @@ static void start_interface(GApplication* app, void *p)
 	w->audio_device = AUDIO_DEVICE_DEFAULT;
 	w->restart_audio = 0;
 	w->watch_updating = 0;
+	w->position_updating = 0;
+	w->live_position = POS_NONE;
 
 	load_config(w);
 	set_audio_input_device(w->audio_device);

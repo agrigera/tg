@@ -182,6 +182,20 @@ struct snapshot {
 
 	double trace_centering;
 	double trace_zoom;
+
+	int position; // enum watch_position, set by the user on snapshot tabs
+};
+
+/* Watch position during a measurement (stored in snapshots and .tgj files) */
+enum watch_position {
+	POS_NONE = 0,
+	POS_DU,	// dial up
+	POS_DD,	// dial down
+	POS_CU,	// crown up
+	POS_CD,	// crown down
+	POS_CL,	// crown left
+	POS_CR,	// crown right
+	POS_COUNT
 };
 
 struct computer {
@@ -257,6 +271,9 @@ struct main_window {
 	GtkWidget *snapshot_button;
 	GtkWidget *snapshot_name;
 	GtkWidget *snapshot_name_entry;
+	GtkWidget *snapshot_position_combo;
+	int position_updating; // set while the position combo is changed programmatically
+	int live_position;     // position for the next snapshot (real-time tab)
 	GtkWidget *cal_button; // "Start calibration" / "Stop calibration" menu item
 	GtkWidget *notebook;
 	GtkWidget *open_item;

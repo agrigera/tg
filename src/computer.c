@@ -339,6 +339,7 @@ struct computer *start_computer(int nominal_sr, int bph, double la, int cal, int
 	s->la = la;
 	s->cal = cal;
 	s->is_light = light;
+	s->position = POS_NONE;
 	s->sample_rate = s->nominal_sr * (1 + (double) s->cal / (10 * 3600 * 24));
 	s->guessed_bph = s->bph ? s->bph : DEFAULT_BPH;
 	s->rate = 0;
