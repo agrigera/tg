@@ -224,6 +224,8 @@ struct output_panel {
 	GtkWidget *paperstrip_drawing_area;
 	GtkWidget *clear_button;
 	GtkWidget *right_stack; // "panels" (tic/toc/period) or "calibration" (instructions)
+	GtkWidget *output_frame;     // titled frames whose title depends on calibration
+	GtkWidget *paperstrip_frame;
 #ifdef DEBUG
 	GtkWidget *debug_drawing_area;
 #endif

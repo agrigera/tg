@@ -460,6 +460,58 @@ static gboolean toc_draw_event(GtkWidget *widget, cairo_t *c, struct output_pane
 	return FALSE;
 }
 
+/* Vertical grid with ms labels for a window starting at t_left ms and span_ms wide.
+ * Major (red, labelled) lines use a round step giving at most ~10 labels; minor
+ * (green) lines divide each major step in 5. */
+static void draw_ms_axis(cairo_t *c, int width, int height, int font, double t_left, double span_ms)
+{
+	static const int majors[] = {5, 10, 20, 25, 50, 100, 200, 250, 500, 0};
+	int major = 1000;
+	int i;
+	if(span_ms <= 0 || width <= 0) return;
+	for(i = 0; majors[i]; i++) {
+		if(span_ms / majors[i] <= 10) {
+			major = majors[i];
+			break;
+		}
+	}
+	double minor = major / 5.0;
+	long k0 = (long)ceil(t_left / minor);
+	long k1 = (long)floor((t_left + span_ms) / minor);
+	long k;
+
+	for(k = k0; k <= k1; k++) {
+		double x = (k * minor - t_left) * width / span_ms;
+		if(x <= 0 || x >= width) continue;
+		cairo_move_to(c, round(x) + .5, .5);
+		cairo_line_to(c, round(x) + .5, height - .5);
+		cairo_set_source(c, k % 5 ? green : red);
+		cairo_stroke(c);
+	}
+
+	cairo_set_font_size(c, font);
+	cairo_text_extents_t extents;
+	cairo_text_extents(c, "ms", &extents);
+	double unit_x = width - extents.x_advance - font/4;
+
+	cairo_set_source(c, white);
+	for(k = k0; k <= k1; k++) {
+		if(k % 5) continue;
+		double x = (k * minor - t_left) * width / span_ms;
+		if(x <= 0 || x >= width) continue;
+		char s[16];
+		snprintf(s, sizeof(s), "%ld", lround(k * minor));
+		cairo_text_extents(c, s, &extents);
+		// keep labels clear of the "ms" unit at the right edge
+		if(round(x) + font/4 + extents.x_advance > unit_x - font/2) continue;
+		cairo_move_to(c, round(x) + font/4, height - font/2);
+		cairo_show_text(c, s);
+	}
+
+	cairo_move_to(c, unit_x, height - font/2);
+	cairo_show_text(c, "ms");
+}
+
 static gboolean period_draw_event(GtkWidget *widget, cairo_t *c, struct output_panel *op)
 {
 	UNUSED(widget);
@@ -497,16 +549,18 @@ static gboolean period_draw_event(GtkWidget *widget, cairo_t *c, struct output_p
 		cairo_fill(c);
 	}
 
-	int i;
-	for(i = 1; i < 16; i++) {
-		int x = i * width / 16;
-		cairo_move_to(c, x+.5, .5);
-		cairo_line_to(c, x+.5, height - .5);
-		if(i % 4)
-			cairo_set_source(c,green);
-		else
-			cairo_set_source(c,red);
-		cairo_stroke(c);
+	// Time axis in ms, 0 at the tic (same convention as the tic/toc panels)
+	{
+		GtkAllocation top;
+		gtk_widget_get_allocation(gtk_widget_get_toplevel(op->period_drawing_area), &top);
+		int font = top.width / 90;
+		if(font < 12)
+			font = 12;
+
+		double sr = snst->sample_rate > 0 ? snst->sample_rate : snst->nominal_sr;
+		double span_ms = p ? 1000. * p->period / sr : 1000. * 7200. / snst->guessed_bph;
+		double t_left = p ? 1000. * (a - p->tic) / sr : 0;
+		draw_ms_axis(c, width, height, font, t_left, span_ms);
 	}
 
 	if(p) {
@@ -888,12 +942,38 @@ static void handle_right(GtkButton *b, struct output_panel *op)
 }
 
 /* While calibrating, the waveform panels are meaningless: show instructions instead */
+#define TITLE_RESULTS     "Results: rate, beat error, amplitude, beat rate"
+#define TITLE_CAL_STATUS  "Calibration status and result"
+#define TITLE_PAPERSTRIP  "Paper strip: beat timing over time"
+#define TITLE_PAPERSTRIP_CAL "Paper strip: reference ticks"
+
+/* Wrap a panel in a frame with a small title on top */
+static GtkWidget *titled_frame(GtkWidget *child, const char *title)
+{
+	GtkWidget *frame = gtk_frame_new(title);
+	gtk_frame_set_label_align(GTK_FRAME(frame), 0.01, 0.5);
+	gtk_frame_set_shadow_type(GTK_FRAME(frame), GTK_SHADOW_NONE);
+	gtk_container_add(GTK_CONTAINER(frame), child);
+	return frame;
+}
+
+static void set_frame_title(GtkWidget *frame, const char *title)
+{
+	const gchar *current = gtk_frame_get_label(GTK_FRAME(frame));
+	if(!current || strcmp(current, title))
+		gtk_frame_set_label(GTK_FRAME(frame), title);
+}
+
 static void update_right_side(struct output_panel *op)
 {
-	const char *page = op->snst && op->snst->calibrate ? "calibration" : "panels";
+	int cal = op->snst && op->snst->calibrate;
+	const char *page = cal ? "calibration" : "panels";
 	const gchar *current = gtk_stack_get_visible_child_name(GTK_STACK(op->right_stack));
 	if(!current || strcmp(current, page))
 		gtk_stack_set_visible_child_name(GTK_STACK(op->right_stack), page);
+
+	set_frame_title(op->output_frame, cal ? TITLE_CAL_STATUS : TITLE_RESULTS);
+	set_frame_title(op->paperstrip_frame, cal ? TITLE_PAPERSTRIP_CAL : TITLE_PAPERSTRIP);
 }
 
 static GtkWidget *make_calibration_instructions(void)
@@ -978,7 +1058,8 @@ struct output_panel *init_output_panel(struct computer *comp, struct snapshot *s
 	// Info area on top
 	op->output_drawing_area = gtk_drawing_area_new();
 	gtk_widget_set_size_request(op->output_drawing_area, 0, OUTPUT_WINDOW_HEIGHT);
-	gtk_box_pack_start(GTK_BOX(op->panel),op->output_drawing_area, FALSE, TRUE, 0);
+	op->output_frame = titled_frame(op->output_drawing_area, TITLE_RESULTS);
+	gtk_box_pack_start(GTK_BOX(op->panel), op->output_frame, FALSE, TRUE, 0);
 	g_signal_connect (op->output_drawing_area, "draw", G_CALLBACK(output_draw_event), op);
 	gtk_widget_set_events(op->output_drawing_area, GDK_EXPOSURE_MASK);
 
@@ -991,7 +1072,8 @@ struct output_panel *init_output_panel(struct computer *comp, struct snapshot *s
 	// Paperstrip
 	op->paperstrip_drawing_area = gtk_drawing_area_new();
 	gtk_widget_set_size_request(op->paperstrip_drawing_area, 300, 0);
-	gtk_box_pack_start(GTK_BOX(vbox2), op->paperstrip_drawing_area, TRUE, TRUE, 0);
+	op->paperstrip_frame = titled_frame(op->paperstrip_drawing_area, TITLE_PAPERSTRIP);
+	gtk_box_pack_start(GTK_BOX(vbox2), op->paperstrip_frame, TRUE, TRUE, 0);
 	g_signal_connect (op->paperstrip_drawing_area, "draw", G_CALLBACK(paperstrip_draw_event), op);
 	gtk_widget_set_events(op->paperstrip_drawing_area, GDK_EXPOSURE_MASK);
 
@@ -1040,30 +1122,34 @@ struct output_panel *init_output_panel(struct computer *comp, struct snapshot *s
 	GtkWidget *vbox3 = gtk_box_new(GTK_ORIENTATION_VERTICAL,10);
 	gtk_stack_add_named(GTK_STACK(op->right_stack), vbox3, "panels");
 
-	GtkWidget *cal_info = make_calibration_instructions();
+	GtkWidget *cal_info = titled_frame(make_calibration_instructions(), "Calibration instructions");
 	gtk_stack_add_named(GTK_STACK(op->right_stack), cal_info, "calibration");
 
 	// Tic waveform area
 	op->tic_drawing_area = gtk_drawing_area_new();
-	gtk_box_pack_start(GTK_BOX(vbox3), op->tic_drawing_area, TRUE, TRUE, 0);
+	gtk_box_pack_start(GTK_BOX(vbox3), titled_frame(op->tic_drawing_area,
+			"Tic: averaged sound of the first beat"), TRUE, TRUE, 0);
 	g_signal_connect (op->tic_drawing_area, "draw", G_CALLBACK(tic_draw_event), op);
 	gtk_widget_set_events(op->tic_drawing_area, GDK_EXPOSURE_MASK);
 
 	// Toc waveform area
 	op->toc_drawing_area = gtk_drawing_area_new();
-	gtk_box_pack_start(GTK_BOX(vbox3), op->toc_drawing_area, TRUE, TRUE, 0);
+	gtk_box_pack_start(GTK_BOX(vbox3), titled_frame(op->toc_drawing_area,
+			"Toc: averaged sound of the second beat"), TRUE, TRUE, 0);
 	g_signal_connect (op->toc_drawing_area, "draw", G_CALLBACK(toc_draw_event), op);
 	gtk_widget_set_events(op->toc_drawing_area, GDK_EXPOSURE_MASK);
 
 	// Period waveform area
 	op->period_drawing_area = gtk_drawing_area_new();
-	gtk_box_pack_start(GTK_BOX(vbox3), op->period_drawing_area, TRUE, TRUE, 0);
+	gtk_box_pack_start(GTK_BOX(vbox3), titled_frame(op->period_drawing_area,
+			"Full period: tic and toc (highlighted)"), TRUE, TRUE, 0);
 	g_signal_connect (op->period_drawing_area, "draw", G_CALLBACK(period_draw_event), op);
 	gtk_widget_set_events(op->period_drawing_area, GDK_EXPOSURE_MASK);
 
 #ifdef DEBUG
 	op->debug_drawing_area = gtk_drawing_area_new();
-	gtk_box_pack_start(GTK_BOX(vbox3), op->debug_drawing_area, TRUE, TRUE, 0);
+	gtk_box_pack_start(GTK_BOX(vbox3), titled_frame(op->debug_drawing_area,
+			"Debug: processed signal"), TRUE, TRUE, 0);
 	g_signal_connect (op->debug_drawing_area, "draw", G_CALLBACK(debug_draw_event), op);
 	gtk_widget_set_events(op->debug_drawing_area, GDK_EXPOSURE_MASK);
 #endif
