@@ -24,6 +24,7 @@ float pa_buffers[PA_BUFF_SIZE];
 int write_pointer = 0;
 uint64_t timestamp = 0;
 pthread_mutex_t audio_mutex;
+static int audio_mutex_initialized = 0;
 static PaDeviceIndex selected_input_device = paNoDevice;
 static int selected_sample_rate = PA_SAMPLE_RATE;
 static float input_level = 0;
@@ -105,9 +106,12 @@ int start_portaudio(int *nominal_sample_rate, double *real_sample_rate)
 {
 	PaStream *stream;
 
-	if(pthread_mutex_init(&audio_mutex,NULL)) {
-		error("Failed to setup audio mutex");
-		return 1;
+	if(!audio_mutex_initialized) {
+		if(pthread_mutex_init(&audio_mutex,NULL)) {
+			error("Failed to setup audio mutex");
+			return 1;
+		}
+		audio_mutex_initialized = 1;
 	}
 
 	PaError err = Pa_Initialize();

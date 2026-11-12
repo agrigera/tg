@@ -318,6 +318,8 @@ struct main_window {
 	int cal; // 0.1 s/d
 	int nominal_sr;
 	int restart_audio;
+	int pending_audio_device;
+	int pending_audio_rate;
 
 	GKeyFile *config_file;
 	gchar *config_file_name;

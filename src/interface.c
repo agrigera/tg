@@ -31,6 +31,11 @@ int preset_bph[] = PRESET_BPH;
 static const int available_sample_rates[] = {22050, 32000, 44100, 48000, 96000, 0};
 static const char *available_sample_rate_labels[] = {"22.05 kHz", "32 kHz", "44.1 kHz", "48 kHz", "96 kHz", NULL};
 
+static guint kick_computer(struct main_window *w);
+guint save_on_change_timer(struct main_window *w);
+static void remove_runtime_timers(struct main_window *w);
+static void update_sensitivity(struct main_window *w);
+
 void print_debug(char *format,...)
 {
 	va_list args;
@@ -381,13 +386,35 @@ static void audio_show(struct main_window *w, const char *name, int is_default)
 	g_free(tip);
 }
 
+static void audio_refresh_selection(struct main_window *w)
+{
+	int *devices = NULL;
+	char **names = NULL;
+	int count = 0;
+	int default_device = AUDIO_DEVICE_DEFAULT;
+	if(!list_audio_input_devices(&devices, &names, &count, &default_device)) {
+		for(int i = 0; i < count; i++) {
+			if(devices[i] == w->audio_device) {
+				audio_show(w, names[i], devices[i] == default_device);
+				break;
+			}
+		}
+		free_audio_input_devices(devices, names, count);
+	} else {
+		audio_show(w, "No audio input", 0);
+	}
+}
+
 /* Use a device: the same steps the old combo box took when its selection changed */
 static void audio_apply_device(struct main_window *w, int device)
 {
 	if(!w->controls_active || device == w->audio_device) return;
-	w->audio_device = device;
-	set_audio_input_device(w->audio_device);
+	w->pending_audio_device = device;
+	w->pending_audio_rate = w->nominal_sr;
 	w->restart_audio = 1;
+	gtk_widget_set_tooltip_text(w->audio_combo_box, "Opening audio input...");
+	gtk_widget_set_sensitive(w->audio_combo_box, FALSE);
+	gtk_widget_set_sensitive(w->sample_rate_combo_box, FALSE);
 
 	lock_computer(w->computer);
 	if(w->computer->recompute >= 0)
@@ -400,9 +427,6 @@ static void handle_audio_pick(GtkButton *item, struct main_window *w)
 	GtkWidget *popover = gtk_widget_get_ancestor(GTK_WIDGET(item), GTK_TYPE_POPOVER);
 	if(popover) gtk_widget_hide(popover);
 
-	const char *name = g_object_get_data(G_OBJECT(item), "name");
-	int is_default = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(item), "default"));
-	audio_show(w, name, is_default);
 	audio_apply_device(w, GPOINTER_TO_INT(g_object_get_data(G_OBJECT(item), "device")));
 }
 
@@ -419,9 +443,11 @@ static void handle_sample_rate_change(GtkComboBox *b, struct main_window *w)
 	if((int)sample_rate == w->nominal_sr)
 		return;
 
-	w->nominal_sr = (int)sample_rate;
-	set_audio_sample_rate(w->nominal_sr);
+	w->pending_audio_device = w->audio_device;
+	w->pending_audio_rate = (int)sample_rate;
 	w->restart_audio = 1;
+	gtk_widget_set_sensitive(w->audio_combo_box, FALSE);
+	gtk_widget_set_sensitive(w->sample_rate_combo_box, FALSE);
 
 	lock_computer(w->computer);
 	if(w->computer->recompute >= 0)
@@ -465,7 +491,8 @@ static void on_shutdown(GApplication *app, void *p)
 	struct main_window *w = g_object_get_data(G_OBJECT(app), "main-window");
 	if(w) {
 		save_config(w);
-		computer_destroy(w->computer);
+		if(w->computer)
+			computer_destroy(w->computer);
 		op_destroy(w->active_panel);
 		close_config(w);
 		free(w);
@@ -476,6 +503,18 @@ static void on_shutdown(GApplication *app, void *p)
 static void recompute(struct main_window *w);
 static void computer_callback(void *w);
 
+static void remove_runtime_timers(struct main_window *w)
+{
+	if(w->kick_timeout) {
+		g_source_remove(w->kick_timeout);
+		w->kick_timeout = 0;
+	}
+	if(w->save_timeout) {
+		g_source_remove(w->save_timeout);
+		w->save_timeout = 0;
+	}
+}
+
 static guint computer_terminated(struct main_window *w)
 {
 	if(w->zombie) {
@@ -485,35 +524,57 @@ static guint computer_terminated(struct main_window *w)
 		debug("Restarting computer");
 
 		if(w->restart_audio) {
-			double real_sr;
-			int requested_sr = w->nominal_sr;
-			if(terminate_portaudio() || start_portaudio(&w->nominal_sr, &real_sr)) {
-				set_audio_sample_rate(PA_SAMPLE_RATE);
-				w->nominal_sr = PA_SAMPLE_RATE;
-				if(start_portaudio(&w->nominal_sr, &real_sr)) {
-					g_source_remove(w->kick_timeout);
-					g_source_remove(w->save_timeout);
-					w->zombie = 1;
-					error("Failed to restart audio input");
-					gtk_widget_destroy(w->window);
-					return FALSE;
-				}
-				error("Sample rate %d not available on selected device. Falling back to %d.", requested_sr, PA_SAMPLE_RATE);
-				if(w->sample_rate_combo_box) {
-					char id[32];
-					sprintf(id, "%d", w->nominal_sr);
-					gtk_combo_box_set_active_id(GTK_COMBO_BOX(w->sample_rate_combo_box), id);
-				}
+			int requested_device = w->pending_audio_device;
+			int requested_rate = w->pending_audio_rate;
+			int actual_rate = requested_rate;
+			double real_rate = 0;
+			int failed = 0;
+			terminate_portaudio();
+			set_audio_input_device(requested_device);
+			set_audio_sample_rate(requested_rate);
+			failed = start_portaudio(&actual_rate, &real_rate);
+			if(failed && requested_device != AUDIO_DEVICE_DEFAULT) {
+				terminate_portaudio();
+				set_audio_input_device(AUDIO_DEVICE_DEFAULT);
+				set_audio_sample_rate(requested_rate);
+				actual_rate = requested_rate;
+				failed = start_portaudio(&actual_rate, &real_rate);
 			}
-			w->audio_device = get_audio_input_device();
-			w->nominal_sr = get_audio_sample_rate();
+			if(failed && requested_rate != PA_SAMPLE_RATE) {
+				terminate_portaudio();
+				set_audio_input_device(AUDIO_DEVICE_DEFAULT);
+				set_audio_sample_rate(PA_SAMPLE_RATE);
+				actual_rate = PA_SAMPLE_RATE;
+				failed = start_portaudio(&actual_rate, &real_rate);
+			}
+			if(failed) {
+				terminate_portaudio();
+				w->audio_device = AUDIO_DEVICE_DEFAULT;
+				w->nominal_sr = PA_SAMPLE_RATE;
+				set_audio_input_device(w->audio_device);
+				set_audio_sample_rate(w->nominal_sr);
+				audio_show(w, "No audio input", 0);
+				error("Could not open the requested audio input; select another device to retry.");
+			} else {
+				w->audio_device = get_audio_input_device();
+				w->nominal_sr = get_audio_sample_rate();
+				audio_refresh_selection(w);
+				if(w->audio_device != requested_device || w->nominal_sr != requested_rate)
+					error("The requested audio input or rate is unavailable; using a fallback.");
+			}
+			w->pending_audio_device = w->audio_device;
+			w->pending_audio_rate = w->nominal_sr;
 			w->restart_audio = 0;
+			if(w->sample_rate_combo_box) {
+				char id[32];
+				sprintf(id, "%d", w->nominal_sr);
+				gtk_combo_box_set_active_id(GTK_COMBO_BOX(w->sample_rate_combo_box), id);
+			}
 		}
 
 		struct computer *c = start_computer(w->nominal_sr, w->bph, w->la, w->cal, w->is_light);
 		if(!c) {
-			g_source_remove(w->kick_timeout);
-			g_source_remove(w->save_timeout);
+			remove_runtime_timers(w);
 			w->zombie = 1;
 			error("Failed to restart computation thread");
 			gtk_widget_destroy(w->window);
@@ -525,6 +586,7 @@ static guint computer_terminated(struct main_window *w)
 			w->computer->callback_data = w;
 
 			recompute(w);
+			update_sensitivity(w);
 		}
 	}
 	return FALSE;
@@ -544,12 +606,15 @@ static void kill_computer(struct main_window *w)
 
 static gboolean quit(struct main_window *w)
 {
-	g_source_remove(w->kick_timeout);
-	g_source_remove(w->save_timeout);
+	remove_runtime_timers(w);
 	w->zombie = 1;
-	lock_computer(w->computer);
-	kill_computer(w);
-	unlock_computer(w->computer);
+	if(w->computer) {
+		lock_computer(w->computer);
+		kill_computer(w);
+		unlock_computer(w->computer);
+	} else {
+		gtk_widget_destroy(w->window);
+	}
 	return FALSE;
 }
 
@@ -1520,6 +1585,8 @@ guint save_on_change_timer(struct main_window *w)
 
 guint refresh(struct main_window *w)
 {
+	if(!w->computer)
+		return FALSE;
 	lock_computer(w->computer);
 	struct snapshot *s = w->computer->curr;
 	if(s) {
@@ -1582,17 +1649,27 @@ static void start_interface(GApplication* app, void *p)
 	w->nominal_sr = PA_SAMPLE_RATE;
 	w->audio_device = AUDIO_DEVICE_DEFAULT;
 	w->restart_audio = 0;
+	w->pending_audio_device = AUDIO_DEVICE_DEFAULT;
+	w->pending_audio_rate = PA_SAMPLE_RATE;
 	w->watch_updating = 0;
 	w->position_updating = 0;
 	w->live_position = POS_NONE;
 
 	load_config(w);
+	/* Always start with the default input; some drivers block while opening. */
+	w->audio_device = AUDIO_DEVICE_DEFAULT;
 	set_audio_input_device(w->audio_device);
 	set_audio_sample_rate(w->nominal_sr);
 
 	if(start_portaudio(&w->nominal_sr, &real_sr)) {
-		g_application_quit(app);
-		return;
+		terminate_portaudio();
+		w->nominal_sr = PA_SAMPLE_RATE;
+		set_audio_sample_rate(w->nominal_sr);
+		if(start_portaudio(&w->nominal_sr, &real_sr)) {
+			g_application_quit(app);
+			return;
+		}
+		error("Saved sample rate unavailable; using the default rate.");
 	}
 	w->audio_device = get_audio_input_device();
 	w->nominal_sr = get_audio_sample_rate();
