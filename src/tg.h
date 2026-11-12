@@ -249,9 +249,16 @@ struct output_panel {
 	GtkWidget *period_drawing_area;
 	GtkWidget *paperstrip_drawing_area;
 	GtkWidget *clear_button;
+	GtkWidget *paperstrip_tick_spin;
+	GtkWidget *paperstrip_window_spin;
 	GtkWidget *right_stack; // "panels" (tic/toc/period) or "calibration" (instructions)
 	GtkWidget *output_frame;     // titled frames whose title depends on calibration
 	GtkWidget *paperstrip_frame;
+	double paperstrip_tick_seconds;
+	double paperstrip_window_seconds;
+	int updating_paperstrip_settings;
+	void (*paperstrip_settings_changed)(void *, double, double);
+	void *paperstrip_settings_data;
 	double guide_rate;           // filtered rate (s/d) for the paper strip rate guide
 	gint64 guide_time;           // monotonic time of the last filter update, 0 = restart
 	float audio_meter_level;
@@ -268,6 +275,9 @@ struct output_panel {
 
 void initialize_palette();
 struct output_panel *init_output_panel(struct computer *comp, struct snapshot *snst, int border);
+void op_set_paperstrip_settings(struct output_panel *op, double tick_seconds, double window_seconds);
+void op_set_paperstrip_settings_callback(struct output_panel *op,
+	void (*callback)(void *, double, double), void *data);
 void redraw_op(struct output_panel *op);
 void op_set_snapshot(struct output_panel *op, struct snapshot *snst);
 void op_set_border(struct output_panel *op, int i);
@@ -316,6 +326,8 @@ struct main_window {
 	int audio_device;
 	double la; // deg
 	int cal; // 0.1 s/d
+	double paperstrip_tick_seconds;
+	double paperstrip_window_seconds;
 	int nominal_sr;
 	int restart_audio;
 	int pending_audio_device;
@@ -345,7 +357,9 @@ void error(char *format,...);
 	OP(calibration, cal, int) \
 	OP(light_algorithm, is_light, int) \
 	OP(audio_device, audio_device, int) \
-	OP(audio_rate, nominal_sr, int)
+	OP(audio_rate, nominal_sr, int) \
+	OP(paperstrip_tick_seconds, paperstrip_tick_seconds, double) \
+	OP(paperstrip_window_seconds, paperstrip_window_seconds, double)
 
 struct conf_data {
 #define DEF(NAME,PLACE,TYPE) TYPE PLACE;

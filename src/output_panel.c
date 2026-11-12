@@ -868,7 +868,6 @@ static gboolean paperstrip_draw_event(GtkWidget *widget, cairo_t *c, struct outp
 	}
 	if(!isfinite(sweep) || sweep <= 0 || !isfinite(zoom_factor) || zoom_factor <= 0)
 		return FALSE;
-
 	cairo_init(c);
 
 	GtkAllocation temp;
@@ -878,12 +877,9 @@ static gboolean paperstrip_draw_event(GtkWidget *widget, cairo_t *c, struct outp
 	int height = temp.height;
 
 	int stopped = 0;
-	if( valid_events_wp &&
-	    snst->events[snst->events_wp] &&
-	    time > 5 * snst->nominal_sr + snst->events[snst->events_wp]) {
-		time = 5 * snst->nominal_sr + snst->events[snst->events_wp];
+	if(valid_events_wp && snst->events[snst->events_wp] &&
+		time > 5 * snst->nominal_sr + snst->events[snst->events_wp])
 		stopped = 1;
-	}
 
 	int strip_width = round(width / (1 + PAPERSTRIP_MARGIN));
 	int left_margin = (width - strip_width) / 2;
@@ -901,6 +897,11 @@ static gboolean paperstrip_draw_event(GtkWidget *widget, cairo_t *c, struct outp
 	const double plot_top = scale_rows * (font + 4) + 4;
 	const double plot_bottom = height - (font + 8);
 	if(plot_bottom - plot_top < 20)
+		return FALSE;
+	double y_sample_rate = snst->calibrate ? snst->nominal_sr : safe_sample_rate;
+	double row_samples = y_sample_rate * op->paperstrip_window_seconds /
+		(plot_bottom - plot_top);
+	if(!isfinite(row_samples) || row_samples <= 0)
 		return FALSE;
 
 	// Width of the strip in ms (a beat in normal mode, a second in calibration, divided by the zoom)
@@ -927,9 +928,15 @@ static gboolean paperstrip_draw_event(GtkWidget *widget, cairo_t *c, struct outp
 	cairo_text_extents_t extents;
 
 	double now = sweep*ceil(time/sweep);
-	double ten_s = safe_sample_rate * 10 / sweep;
-	double last_line = fmod(now/sweep, ten_s);
-	int last_tenth = floor(now/(sweep*ten_s));
+	double mark_samples = op->paperstrip_tick_seconds * y_sample_rate;
+	double mark_rows = mark_samples / row_samples;
+	if(!isfinite(mark_rows) || mark_rows <= 0)
+		return FALSE;
+	int64_t last_mark_index = (int64_t)floor(now / mark_samples);
+	int64_t mark_stride = (int64_t)ceil(1.0 / mark_rows);
+	if(mark_stride < 1) mark_stride = 1;
+	int64_t label_stride = (int64_t)ceil((font + 8.0) / (mark_rows * mark_stride));
+	if(label_stride < 1) label_stride = 1;
 
 	// Everything below is clipped to the data area
 	cairo_save(c);
@@ -963,20 +970,44 @@ static gboolean paperstrip_draw_event(GtkWidget *widget, cairo_t *c, struct outp
 	set_axis_style(c, COL_AXIS, 1);
 	cairo_stroke(c);
 
-	// Time marks move with the data: dotted every 10 s, solid every minute,
-	// labelled with the time since the start of the measurement
+	// Custom y marks are dotted; minute marks are drawn separately as solid guides.
 	cairo_set_font_size(c, font * 0.8);
-	for(i=0;;i++) {
-		int tenth = last_tenth - i;
-		double y = plot_bottom - 0.5 - round(last_line + i*ten_s);
-		if(y < plot_top || tenth < 0) break;
+	for(int64_t mark_offset = 0; mark_offset <= last_mark_index; mark_offset += mark_stride) {
+		int64_t mark_index = last_mark_index - mark_offset;
+		double mark_seconds = mark_index * op->paperstrip_tick_seconds;
+		double mark_time = mark_seconds * y_sample_rate;
+		double y = plot_bottom - 0.5 - round((now - mark_time) / row_samples);
+		if(y < plot_top) break;
 		cairo_move_to(c, .5, y);
 		cairo_line_to(c, width-.5, y);
-		set_axis_style(c, COL_AXIS, !(tenth % 6));
+		set_axis_style(c, COL_AXIS, 0);
 		cairo_stroke(c);
 		set_dotted(c, 0);
 
-		snprintf(s, sizeof(s), "%d:%02d", tenth / 6, (tenth % 6) * 10);
+		if((mark_offset / mark_stride) % label_stride == 0) {
+			unsigned long long minutes = (unsigned long long)(mark_seconds / 60.0);
+			double seconds = fmod(mark_seconds, 60.0);
+			if(op->paperstrip_tick_seconds < 10.0)
+				snprintf(s, sizeof(s), "%llu:%05.2f", minutes, seconds);
+			else
+				snprintf(s, sizeof(s), "%llu:%02d", minutes, (int)round(seconds));
+			cairo_text_extents(c, s, &extents);
+			set_color(c, COL_AXIS, 0.7);
+			cairo_move_to(c, fmax(1, left_margin - extents.x_advance - 3), y - 2);
+			cairo_show_text(c, s);
+		}
+	}
+	int64_t last_minute_index = (int64_t)floor(now / (60.0 * y_sample_rate));
+	for(int64_t minute_index = last_minute_index; minute_index >= 0; minute_index--) {
+		double minute_time = minute_index * 60.0 * y_sample_rate;
+		double y = plot_bottom - 0.5 - round((now - minute_time) / row_samples);
+		if(y < plot_top) break;
+		cairo_move_to(c, .5, y);
+		cairo_line_to(c, width-.5, y);
+		set_axis_style(c, COL_AXIS, 1);
+		cairo_stroke(c);
+		set_dotted(c, 0);
+		snprintf(s, sizeof(s), "%llu:00", (unsigned long long)minute_index);
 		cairo_text_extents(c, s, &extents);
 		set_color(c, COL_AXIS, 0.7);
 		cairo_move_to(c, fmax(1, left_margin - extents.x_advance - 3), y - 2);
@@ -1025,7 +1056,7 @@ static gboolean paperstrip_draw_event(GtkWidget *widget, cairo_t *c, struct outp
 		for(i = snst->amps_wp;;) {
 			if(!snst->amps_time[i]) break;
 			double event_age = now - snst->amps_time[i];
-			double row = floor(event_age / sweep);
+			double row = floor(event_age / row_samples);
 			if(row >= plot_bottom) break;
 
 			double amp_deg = snst->la * snst->amps[i];
@@ -1057,7 +1088,7 @@ static gboolean paperstrip_draw_event(GtkWidget *widget, cairo_t *c, struct outp
 		if(!snst->events_count || !snst->events[i]) break;
 		double event = now - snst->events[i] + snst->trace_centering + sweep * PAPERSTRIP_MARGIN / (2 * zoom_factor);
 		int column = floor(fmod(event, (sweep / zoom_factor)) * strip_width / (sweep / zoom_factor));
-		int row = floor(event / sweep);
+		int row = floor(event / row_samples);
 		if(row >= plot_bottom) break;
 
 		struct color dot = COL_WAVE;
@@ -1259,6 +1290,17 @@ static void zoom_trace(struct output_panel *op, double factor)
 	gtk_widget_queue_draw(op->paperstrip_drawing_area);
 }
 
+static void handle_paperstrip_setting_change(GtkSpinButton *spin, struct output_panel *op)
+{
+	UNUSED(spin);
+	op->paperstrip_tick_seconds = gtk_spin_button_get_value(GTK_SPIN_BUTTON(op->paperstrip_tick_spin));
+	op->paperstrip_window_seconds = gtk_spin_button_get_value(GTK_SPIN_BUTTON(op->paperstrip_window_spin));
+	gtk_widget_queue_draw(op->paperstrip_drawing_area);
+	if(!op->updating_paperstrip_settings && op->paperstrip_settings_changed)
+		op->paperstrip_settings_changed(op->paperstrip_settings_data,
+			op->paperstrip_tick_seconds, op->paperstrip_window_seconds);
+}
+
 static void handle_zoom_out(GtkButton *b, struct output_panel *op)
 {
 	UNUSED(b);
@@ -1379,7 +1421,27 @@ void op_set_snapshot(struct output_panel *op, struct snapshot *snst)
 	if(op->snst && op->snst->trace_zoom <= 0)
 		op->snst->trace_zoom = 1.0;
 	gtk_widget_set_sensitive(op->clear_button, !snst->calibrate);
+	gtk_widget_set_sensitive(op->paperstrip_tick_spin, !snst->calibrate);
+	gtk_widget_set_sensitive(op->paperstrip_window_spin, !snst->calibrate);
 	update_right_side(op);
+}
+
+void op_set_paperstrip_settings(struct output_panel *op, double tick_seconds, double window_seconds)
+{
+	op->updating_paperstrip_settings = 1;
+	op->paperstrip_tick_seconds = tick_seconds;
+	op->paperstrip_window_seconds = window_seconds;
+	gtk_spin_button_set_value(GTK_SPIN_BUTTON(op->paperstrip_tick_spin), tick_seconds);
+	gtk_spin_button_set_value(GTK_SPIN_BUTTON(op->paperstrip_window_spin), window_seconds);
+	op->updating_paperstrip_settings = 0;
+	gtk_widget_queue_draw(op->paperstrip_drawing_area);
+}
+
+void op_set_paperstrip_settings_callback(struct output_panel *op,
+	void (*callback)(void *, double, double), void *data)
+{
+	op->paperstrip_settings_changed = callback;
+	op->paperstrip_settings_data = data;
 }
 
 void op_set_border(struct output_panel *op, int i)
@@ -1406,6 +1468,11 @@ struct output_panel *init_output_panel(struct computer *comp, struct snapshot *s
 	op->audio_meter_active = 0;
 	op->audio_meter_transition_count = 0;
 	op->audio_status = -1;
+	op->paperstrip_tick_seconds = 10.0;
+	op->paperstrip_window_seconds = 60.0;
+	op->updating_paperstrip_settings = 0;
+	op->paperstrip_settings_changed = NULL;
+	op->paperstrip_settings_data = NULL;
 
 	op->panel = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
 	gtk_container_set_border_width(GTK_CONTAINER(op->panel), border);
@@ -1468,6 +1535,30 @@ struct output_panel *init_output_panel(struct computer *comp, struct snapshot *s
 	GtkWidget *right_button = gtk_button_new_with_label(">");
 	gtk_box_pack_start(GTK_BOX(hbox3), right_button, TRUE, TRUE, 0);
 	g_signal_connect (right_button, "clicked", G_CALLBACK(handle_right), op);
+
+	GtkWidget *settings_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+	gtk_box_pack_start(GTK_BOX(vbox2), settings_box, FALSE, TRUE, 0);
+	GtkWidget *tick_label = gtk_label_new("Y mark");
+	gtk_box_pack_start(GTK_BOX(settings_box), tick_label, FALSE, FALSE, 0);
+	op->paperstrip_tick_spin = gtk_spin_button_new_with_range(0.01, 3600, 0.1);
+	gtk_spin_button_set_digits(GTK_SPIN_BUTTON(op->paperstrip_tick_spin), 2);
+	gtk_entry_set_width_chars(GTK_ENTRY(op->paperstrip_tick_spin), 6);
+	gtk_widget_set_tooltip_text(op->paperstrip_tick_spin,
+		"Time between marks on the vertical axis, in seconds.");
+	gtk_box_pack_start(GTK_BOX(settings_box), op->paperstrip_tick_spin, FALSE, FALSE, 0);
+	g_signal_connect(op->paperstrip_tick_spin, "value_changed",
+		G_CALLBACK(handle_paperstrip_setting_change), op);
+
+	GtkWidget *window_label = gtk_label_new("Y window");
+	gtk_box_pack_start(GTK_BOX(settings_box), window_label, FALSE, FALSE, 0);
+	op->paperstrip_window_spin = gtk_spin_button_new_with_range(10, 86400, 10);
+	gtk_spin_button_set_digits(GTK_SPIN_BUTTON(op->paperstrip_window_spin), 0);
+	gtk_entry_set_width_chars(GTK_ENTRY(op->paperstrip_window_spin), 6);
+	gtk_widget_set_tooltip_text(op->paperstrip_window_spin,
+		"Fixed time span shown vertically. It does not change automatically.");
+	gtk_box_pack_start(GTK_BOX(settings_box), op->paperstrip_window_spin, FALSE, FALSE, 0);
+	g_signal_connect(op->paperstrip_window_spin, "value_changed",
+		G_CALLBACK(handle_paperstrip_setting_change), op);
 
 	// Right side: waveform panels, or calibration instructions while calibrating
 	op->right_stack = gtk_stack_new();

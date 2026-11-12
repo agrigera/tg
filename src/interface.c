@@ -923,9 +923,20 @@ static GtkWidget *make_tab_label(char *name, struct output_panel *panel_to_close
 	return hbox;
 }
 
+static void handle_paperstrip_settings_changed(void *data, double tick_seconds,
+	double window_seconds)
+{
+	struct main_window *w = data;
+	w->paperstrip_tick_seconds = tick_seconds;
+	w->paperstrip_window_seconds = window_seconds;
+	save_on_change(w);
+}
+
 static void add_new_tab(struct snapshot *s, char *name, struct main_window *w)
 {
 	struct output_panel *op = init_output_panel(NULL, s, 5);
+	op_set_paperstrip_settings(op, w->active_panel->paperstrip_tick_seconds,
+		w->active_panel->paperstrip_window_seconds);
 	GtkWidget *label = make_tab_label(name, op);
 	gtk_widget_show_all(op->panel);
 
@@ -1646,6 +1657,8 @@ static void start_interface(GApplication* app, void *p)
 	w->la = DEFAULT_LA;
 	w->calibrate = 0;
 	w->is_light = 0;
+	w->paperstrip_tick_seconds = 10.0;
+	w->paperstrip_window_seconds = 60.0;
 	w->nominal_sr = PA_SAMPLE_RATE;
 	w->audio_device = AUDIO_DEVICE_DEFAULT;
 	w->restart_audio = 0;
@@ -1656,6 +1669,12 @@ static void start_interface(GApplication* app, void *p)
 	w->live_position = POS_NONE;
 
 	load_config(w);
+	if(!isfinite(w->paperstrip_tick_seconds) || w->paperstrip_tick_seconds < 0.01 ||
+		w->paperstrip_tick_seconds > 3600.0)
+		w->paperstrip_tick_seconds = 10.0;
+	if(!isfinite(w->paperstrip_window_seconds) || w->paperstrip_window_seconds < 10.0 ||
+		w->paperstrip_window_seconds > 86400.0)
+		w->paperstrip_window_seconds = 60.0;
 	/* Always start with the default input; some drivers block while opening. */
 	w->audio_device = AUDIO_DEVICE_DEFAULT;
 	set_audio_input_device(w->audio_device);
@@ -1695,6 +1714,9 @@ static void start_interface(GApplication* app, void *p)
 	compute_results(w->active_snapshot);
 
 	w->active_panel = init_output_panel(w->computer, w->active_snapshot, 0);
+	op_set_paperstrip_settings(w->active_panel, w->paperstrip_tick_seconds,
+		w->paperstrip_window_seconds);
+	op_set_paperstrip_settings_callback(w->active_panel, handle_paperstrip_settings_changed, w);
 
 	init_main_window(w);
 
