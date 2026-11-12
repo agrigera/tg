@@ -1212,8 +1212,6 @@ static void handle_right(GtkButton *b, struct output_panel *op)
 }
 
 /* While calibrating, the waveform panels are meaningless: show instructions instead */
-#define TITLE_RESULTS     "Results: rate, amplitude, beat error, lift angle, beat rate"
-#define TITLE_CAL_STATUS  "Calibration status and result"
 #define TITLE_PAPERSTRIP  "Paper strip: beat timing over time"
 #define TITLE_PAPERSTRIP_CAL "Paper strip: reference ticks"
 
@@ -1242,7 +1240,6 @@ static void update_right_side(struct output_panel *op)
 	if(!current || strcmp(current, page))
 		gtk_stack_set_visible_child_name(GTK_STACK(op->right_stack), page);
 
-	set_frame_title(op->output_frame, cal ? TITLE_CAL_STATUS : TITLE_RESULTS);
 	set_frame_title(op->paperstrip_frame, cal ? TITLE_PAPERSTRIP_CAL : TITLE_PAPERSTRIP);
 }
 
@@ -1330,8 +1327,7 @@ struct output_panel *init_output_panel(struct computer *comp, struct snapshot *s
 	// Info area on top
 	op->output_drawing_area = gtk_drawing_area_new();
 	gtk_widget_set_size_request(op->output_drawing_area, 0, OUTPUT_WINDOW_HEIGHT);
-	op->output_frame = titled_frame(op->output_drawing_area, TITLE_RESULTS);
-	gtk_box_pack_start(GTK_BOX(op->panel), op->output_frame, FALSE, TRUE, 0);
+	gtk_box_pack_start(GTK_BOX(op->panel), op->output_drawing_area, FALSE, TRUE, 0);
 	g_signal_connect (op->output_drawing_area, "draw", G_CALLBACK(output_draw_event), op);
 	gtk_widget_set_events(op->output_drawing_area, GDK_EXPOSURE_MASK);
 
