@@ -916,6 +916,7 @@ static void compute_cal(struct calibration_data *cd)
 
 void process(struct processing_buffers *p, int bph, double la, int light)
 {
+	p->candidate_period = 0;
 	prepare_data(p, !light);
 	p->ready = !compute_period(p,bph);
 	/* Limit to 20% greater when period is known, or use typical BPH when guessing. */
@@ -925,12 +926,18 @@ void process(struct processing_buffers *p, int bph, double la, int light)
 		debug("Detected period too long\n");
 		p->ready = 0;
 	}
+	if(!p->ready && bph)
+		p->candidate_period = estimate_period(p);
 	if(!p->ready) {
 		debug("abort after compute_period()\n");
 		return;
 	}
 	prepare_waveform(p);
 	p->ready = !compute_parameters(p);
+	if(bph && !p->ready)
+		p->candidate_period = estimate_period(p);
+	if(bph && p->ready && p->sigma > p->period / 10000)
+		p->candidate_period = estimate_period(p);
 	if(!p->ready) {
 		debug("abort after compute_parameters()\n");
 		return;

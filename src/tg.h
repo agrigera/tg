@@ -87,6 +87,7 @@ struct processing_buffers {
 	fftwf_plan plan_a, plan_b, plan_c, plan_d, plan_e, plan_f, plan_g;
 	struct filter *hpf, *lpf;
 	double period,sigma,be,waveform_max,phase,tic_pulse,toc_pulse,amp;
+	double candidate_period;
 	double cal_phase;
 	int waveform_max_i;
 	int tic,toc;
@@ -137,10 +138,19 @@ void set_audio_input_device(int device);
 int get_audio_input_device(void);
 void set_audio_sample_rate(int sample_rate);
 int get_audio_sample_rate(void);
+float get_audio_level(void);
 uint64_t get_timestamp(int light);
 int analyze_pa_data(struct processing_data *pd, int bph, double la, uint64_t events_from);
 int analyze_pa_data_cal(struct processing_data *pd, struct calibration_data *cd);
 void set_audio_light(bool light);
+
+enum audio_input_status {
+	AUDIO_STATUS_UNAVAILABLE = -1,
+	AUDIO_STATUS_NO_INPUT,
+	AUDIO_STATUS_BPH_UNKNOWN,
+	AUDIO_STATUS_BPH_UNCONFIRMED,
+	AUDIO_STATUS_OK
+};
 
 /* computer.c */
 struct snapshot {
@@ -168,6 +178,7 @@ struct snapshot {
 	int amps_count;		//< Number of amplitude samples
 
 	int signal;
+	int audio_status;
 
 	int cal_state;
 	int cal_percent;
@@ -176,12 +187,27 @@ struct snapshot {
 	// data dependent on bph, la, cal
 	double sample_rate;
 	int guessed_bph;
+	int candidate_bph;
 	double rate;
 	double be;
 	double amp;
 
 	double trace_centering;
 	double trace_zoom;
+
+	int position; // enum watch_position, set by the user on snapshot tabs
+};
+
+/* Watch position during a measurement (stored in snapshots and .tgj files) */
+enum watch_position {
+	POS_NONE = 0,
+	POS_DU,	// dial up
+	POS_DD,	// dial down
+	POS_CU,	// crown up
+	POS_CD,	// crown down
+	POS_CL,	// crown left
+	POS_CR,	// crown right
+	POS_COUNT
 };
 
 struct computer {
@@ -223,6 +249,23 @@ struct output_panel {
 	GtkWidget *period_drawing_area;
 	GtkWidget *paperstrip_drawing_area;
 	GtkWidget *clear_button;
+	GtkWidget *paperstrip_tick_spin;
+	GtkWidget *paperstrip_window_spin;
+	GtkWidget *right_stack; // "panels" (tic/toc/period) or "calibration" (instructions)
+	GtkWidget *output_frame;     // titled frames whose title depends on calibration
+	GtkWidget *paperstrip_frame;
+	double paperstrip_tick_seconds;
+	double paperstrip_window_seconds;
+	int updating_paperstrip_settings;
+	void (*paperstrip_settings_changed)(void *, double, double);
+	void *paperstrip_settings_data;
+	double guide_rate;           // filtered rate (s/d) for the paper strip rate guide
+	gint64 guide_time;           // monotonic time of the last filter update, 0 = restart
+	float audio_meter_level;
+	gint64 audio_meter_time;
+	int audio_meter_active;
+	int audio_meter_transition_count;
+	int audio_status;
 #ifdef DEBUG
 	GtkWidget *debug_drawing_area;
 #endif
@@ -232,6 +275,9 @@ struct output_panel {
 
 void initialize_palette();
 struct output_panel *init_output_panel(struct computer *comp, struct snapshot *snst, int border);
+void op_set_paperstrip_settings(struct output_panel *op, double tick_seconds, double window_seconds);
+void op_set_paperstrip_settings_callback(struct output_panel *op,
+	void (*callback)(void *, double, double), void *data);
 void redraw_op(struct output_panel *op);
 void op_set_snapshot(struct output_panel *op, struct snapshot *snst);
 void op_set_border(struct output_panel *op, int i);
@@ -242,16 +288,27 @@ struct main_window {
 	GtkApplication *app;
 
 	GtkWidget *window;
+	GtkWidget *bar_flow;	// the bars, side by side or in rows when narrow
+	GtkWidget *watch_combo_box;
+	GtkWidget *watch_save_button;
+	GtkWidget *watch_delete_button;
+	int watch_updating; // set while the UI is being changed programmatically
 	GtkWidget *bph_combo_box;
 	GtkWidget *audio_combo_box;
+	GtkWidget *audio_label;	// the device name shown in the audio button
 	GtkWidget *sample_rate_combo_box;
 	GtkWidget *la_spin_button;
 	GtkWidget *cal_spin_button;
 	GtkWidget *snapshot_button;
 	GtkWidget *snapshot_name;
 	GtkWidget *snapshot_name_entry;
-	GtkWidget *cal_button;
+	GtkWidget *snapshot_position_combo;
+	int position_updating; // set while the position combo is changed programmatically
+	int live_position;     // position for the next snapshot (real-time tab)
+	GtkWidget *cal_button; // "Start calibration" / "Stop calibration" menu item
 	GtkWidget *notebook;
+	GtkWidget *open_item;
+	GtkWidget *light_item;
 	GtkWidget *save_item;
 	GtkWidget *save_all_item;
 	GtkWidget *close_all_item;
@@ -269,8 +326,12 @@ struct main_window {
 	int audio_device;
 	double la; // deg
 	int cal; // 0.1 s/d
+	double paperstrip_tick_seconds;
+	double paperstrip_window_seconds;
 	int nominal_sr;
 	int restart_audio;
+	int pending_audio_device;
+	int pending_audio_rate;
 
 	GKeyFile *config_file;
 	gchar *config_file_name;
@@ -296,7 +357,9 @@ void error(char *format,...);
 	OP(calibration, cal, int) \
 	OP(light_algorithm, is_light, int) \
 	OP(audio_device, audio_device, int) \
-	OP(audio_rate, nominal_sr, int)
+	OP(audio_rate, nominal_sr, int) \
+	OP(paperstrip_tick_seconds, paperstrip_tick_seconds, double) \
+	OP(paperstrip_window_seconds, paperstrip_window_seconds, double)
 
 struct conf_data {
 #define DEF(NAME,PLACE,TYPE) TYPE PLACE;
@@ -307,6 +370,14 @@ void load_config(struct main_window *w);
 void save_config(struct main_window *w);
 void save_on_change(struct main_window *w);
 void close_config(struct main_window *w);
+
+#define WATCH_NAME_MAX 64 // characters
+int watch_name_valid(const char *name);
+int watch_exists(struct main_window *w, const char *name);
+int get_watch(struct main_window *w, const char *name, int *bph, double *la);
+gchar **list_watches(struct main_window *w); // free with g_strfreev
+void set_watch(struct main_window *w, const char *name, int bph, double la);
+void delete_watch(struct main_window *w, const char *name);
 
 /* serializer.c */
 int write_file(FILE *f, struct snapshot **s, char **names, uint64_t cnt);

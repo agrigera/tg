@@ -114,6 +114,112 @@ void save_on_change(struct main_window *w)
 	CONFIG_FIELDS(CHANGED);
 }
 
+/* Saved watches
+ *
+ * Each watch is stored as its own group in the config file:
+ *
+ *   [watch:Omega 2500]
+ *   bph=25200
+ *   lift_angle=47
+ *
+ * bph=0 means "guess". Group order in the file is the order shown in the UI.
+ */
+
+#define WATCH_GROUP_PREFIX "watch:"
+
+static gchar *watch_group(const char *name)
+{
+	return g_strconcat(WATCH_GROUP_PREFIX, name, NULL);
+}
+
+int watch_name_valid(const char *name)
+{
+	if(!name || !*name) return 0;
+	if(!g_utf8_validate(name, -1, NULL)) return 0;
+	if(g_utf8_strlen(name, -1) > WATCH_NAME_MAX) return 0;
+	if(g_ascii_isspace(name[0]) || g_ascii_isspace(name[strlen(name) - 1])) return 0;
+	const char *p;
+	for(p = name; *p; p++) {
+		/* GKeyFile group names cannot contain brackets or control characters */
+		if(*p == '[' || *p == ']' || g_ascii_iscntrl(*p)) return 0;
+	}
+	return 1;
+}
+
+int get_watch(struct main_window *w, const char *name, int *bph, double *la)
+{
+	if(!watch_name_valid(name)) return 1;
+
+	gchar *group = watch_group(name);
+	GError *e = NULL;
+	int b = g_key_file_get_integer(w->config_file, group, "bph", &e);
+	double l = 0;
+	if(!e) l = g_key_file_get_double(w->config_file, group, "lift_angle", &e);
+	g_free(group);
+
+	if(e) {
+		g_error_free(e);
+		return 1;
+	}
+	if(b != 0 && (b < MIN_BPH || b > MAX_BPH)) return 1;
+	if(l < MIN_LA || l > MAX_LA) return 1;
+
+	*bph = b;
+	*la = l;
+	return 0;
+}
+
+int watch_exists(struct main_window *w, const char *name)
+{
+	if(!watch_name_valid(name)) return 0;
+	gchar *group = watch_group(name);
+	gboolean ret = g_key_file_has_group(w->config_file, group);
+	g_free(group);
+	return ret;
+}
+
+gchar **list_watches(struct main_window *w)
+{
+	gsize n = 0, i, j = 0;
+	gchar **groups = g_key_file_get_groups(w->config_file, &n);
+	gchar **names = g_new0(gchar *, n + 1);
+	size_t prefix_len = strlen(WATCH_GROUP_PREFIX);
+
+	for(i = 0; i < n; i++) {
+		if(strncmp(groups[i], WATCH_GROUP_PREFIX, prefix_len)) continue;
+		const char *name = groups[i] + prefix_len;
+		int bph;
+		double la;
+		if(get_watch(w, name, &bph, &la)) {
+			debug("Config: ignoring invalid watch entry [%s]\n", groups[i]);
+			continue;
+		}
+		names[j++] = g_strdup(name);
+	}
+
+	g_strfreev(groups);
+	return names;
+}
+
+void set_watch(struct main_window *w, const char *name, int bph, double la)
+{
+	if(!watch_name_valid(name)) return;
+	gchar *group = watch_group(name);
+	g_key_file_set_integer(w->config_file, group, "bph", bph);
+	g_key_file_set_double(w->config_file, group, "lift_angle", la);
+	g_free(group);
+	save_config(w);
+}
+
+void delete_watch(struct main_window *w, const char *name)
+{
+	if(!watch_name_valid(name)) return;
+	gchar *group = watch_group(name);
+	g_key_file_remove_group(w->config_file, group, NULL);
+	g_free(group);
+	save_config(w);
+}
+
 void close_config(struct main_window *w)
 {
 	g_key_file_free(w->config_file);

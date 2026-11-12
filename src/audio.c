@@ -24,8 +24,10 @@ float pa_buffers[PA_BUFF_SIZE];
 int write_pointer = 0;
 uint64_t timestamp = 0;
 pthread_mutex_t audio_mutex;
+static int audio_mutex_initialized = 0;
 static PaDeviceIndex selected_input_device = paNoDevice;
 static int selected_sample_rate = PA_SAMPLE_RATE;
+static float input_level = 0;
 
 /* Data for PA callback to use */
 static struct callback_info {
@@ -47,6 +49,15 @@ static int paudio_callback(const void *input_buffer,
 	unsigned long i;
 	const struct callback_info *info = data;
 	unsigned wp = write_pointer;
+	double level_sum = 0;
+	for(i = 0; i < frame_count; i++) {
+		double frame_sum = 0;
+		for(int channel = 0; channel < info->channels; channel++)
+			frame_sum += input_samples[i * info->channels + channel] *
+				input_samples[i * info->channels + channel];
+		level_sum += frame_sum / info->channels;
+	}
+	float current_level = frame_count ? sqrt(level_sum / frame_count) : 0;
 
 	if (info->light) {
 		static bool even = true;
@@ -86,6 +97,7 @@ static int paudio_callback(const void *input_buffer,
 	pthread_mutex_lock(&audio_mutex);
 	write_pointer = wp;
 	timestamp += frame_count;
+	input_level = 0.8f * input_level + 0.2f * current_level;
 	pthread_mutex_unlock(&audio_mutex);
 	return 0;
 }
@@ -94,9 +106,12 @@ int start_portaudio(int *nominal_sample_rate, double *real_sample_rate)
 {
 	PaStream *stream;
 
-	if(pthread_mutex_init(&audio_mutex,NULL)) {
-		error("Failed to setup audio mutex");
-		return 1;
+	if(!audio_mutex_initialized) {
+		if(pthread_mutex_init(&audio_mutex,NULL)) {
+			error("Failed to setup audio mutex");
+			return 1;
+		}
+		audio_mutex_initialized = 1;
 	}
 
 	PaError err = Pa_Initialize();
@@ -307,6 +322,14 @@ int get_audio_sample_rate(void)
 	return selected_sample_rate;
 }
 
+float get_audio_level(void)
+{
+	pthread_mutex_lock(&audio_mutex);
+	float level = input_level;
+	pthread_mutex_unlock(&audio_mutex);
+	return level;
+}
+
 int terminate_portaudio()
 {
 	debug("Closing portaudio\n");
@@ -355,6 +378,8 @@ int analyze_pa_data(struct processing_data *pd, int bph, double la, uint64_t eve
 	fill_buffers(p, pd->is_light);
 
 	int i;
+	for(i = 0; i < NSTEPS; i++)
+		p[i].candidate_period = 0;
 	debug("\nSTART OF COMPUTATION CYCLE\n\n");
 	for(i=0; i<NSTEPS; i++) {
 		p[i].last_tic = pd->last_tic;
