@@ -116,6 +116,7 @@ static void compute_update(struct computer *c)
 {
 	int signal = analyze_pa_data(c->pdata, c->actv->bph, c->actv->la, c->actv->events_from);
 	struct processing_buffers *p = c->pdata->buffers;
+	c->actv->candidate_bph = 0;
 	int i;
 	for(i=0; i<NSTEPS && p[i].ready; i++);
 	for(i--; i>=0 && p[i].sigma > p[i].period / 10000; i--);
@@ -125,6 +126,19 @@ static void compute_update(struct computer *c)
 		c->actv->is_old = 0;
 		c->actv->signal = i == NSTEPS-1 && p[i].amp < 0 ? signal-1 : signal;
 	} else {
+		if(c->actv->bph) {
+			for(int candidate_index = NSTEPS - 1; candidate_index >= 0; candidate_index--) {
+				if(p[candidate_index].candidate_period <= 0)
+					continue;
+				double candidate = 7200.0 * p[candidate_index].sample_rate /
+					p[candidate_index].candidate_period;
+				if(candidate >= MIN_BPH && candidate <= MAX_BPH) {
+					c->actv->candidate_bph = guess_bph(
+						p[candidate_index].candidate_period / p[candidate_index].sample_rate);
+					break;
+				}
+			}
+		}
 		c->actv->is_old = 1;
 		c->actv->signal = -signal;
 	}
@@ -335,6 +349,8 @@ struct computer *start_computer(int nominal_sr, int bph, double la, int cal, int
 	s->cal_state = 0;
 	s->cal_percent = 0;
 	s->cal_result = 0;
+	s->audio_status = AUDIO_STATUS_UNAVAILABLE;
+	s->candidate_bph = 0;
 	s->bph = bph;
 	s->la = la;
 	s->cal = cal;

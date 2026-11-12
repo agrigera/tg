@@ -87,6 +87,7 @@ struct processing_buffers {
 	fftwf_plan plan_a, plan_b, plan_c, plan_d, plan_e, plan_f, plan_g;
 	struct filter *hpf, *lpf;
 	double period,sigma,be,waveform_max,phase,tic_pulse,toc_pulse,amp;
+	double candidate_period;
 	double cal_phase;
 	int waveform_max_i;
 	int tic,toc;
@@ -137,10 +138,19 @@ void set_audio_input_device(int device);
 int get_audio_input_device(void);
 void set_audio_sample_rate(int sample_rate);
 int get_audio_sample_rate(void);
+float get_audio_level(void);
 uint64_t get_timestamp(int light);
 int analyze_pa_data(struct processing_data *pd, int bph, double la, uint64_t events_from);
 int analyze_pa_data_cal(struct processing_data *pd, struct calibration_data *cd);
 void set_audio_light(bool light);
+
+enum audio_input_status {
+	AUDIO_STATUS_UNAVAILABLE = -1,
+	AUDIO_STATUS_NO_INPUT,
+	AUDIO_STATUS_BPH_UNKNOWN,
+	AUDIO_STATUS_BPH_UNCONFIRMED,
+	AUDIO_STATUS_OK
+};
 
 /* computer.c */
 struct snapshot {
@@ -168,6 +178,7 @@ struct snapshot {
 	int amps_count;		//< Number of amplitude samples
 
 	int signal;
+	int audio_status;
 
 	int cal_state;
 	int cal_percent;
@@ -176,6 +187,7 @@ struct snapshot {
 	// data dependent on bph, la, cal
 	double sample_rate;
 	int guessed_bph;
+	int candidate_bph;
 	double rate;
 	double be;
 	double amp;
@@ -242,6 +254,11 @@ struct output_panel {
 	GtkWidget *paperstrip_frame;
 	double guide_rate;           // filtered rate (s/d) for the paper strip rate guide
 	gint64 guide_time;           // monotonic time of the last filter update, 0 = restart
+	float audio_meter_level;
+	gint64 audio_meter_time;
+	int audio_meter_active;
+	int audio_meter_transition_count;
+	int audio_status;
 #ifdef DEBUG
 	GtkWidget *debug_drawing_area;
 #endif
@@ -261,12 +278,14 @@ struct main_window {
 	GtkApplication *app;
 
 	GtkWidget *window;
+	GtkWidget *bar_flow;	// the bars, side by side or in rows when narrow
 	GtkWidget *watch_combo_box;
 	GtkWidget *watch_save_button;
 	GtkWidget *watch_delete_button;
 	int watch_updating; // set while the UI is being changed programmatically
 	GtkWidget *bph_combo_box;
 	GtkWidget *audio_combo_box;
+	GtkWidget *audio_label;	// the device name shown in the audio button
 	GtkWidget *sample_rate_combo_box;
 	GtkWidget *la_spin_button;
 	GtkWidget *cal_spin_button;

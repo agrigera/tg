@@ -192,6 +192,58 @@ static double draw_watch_icon(cairo_t *c, int signal, int happy, int light)
 	return OUTPUT_WINDOW_HEIGHT + 3*l;
 }
 
+static enum audio_input_status get_input_status(struct snapshot *snst)
+{
+	if(snst->pb && !snst->is_old)
+		return AUDIO_STATUS_OK;
+	return snst->bph ? AUDIO_STATUS_BPH_UNCONFIRMED : AUDIO_STATUS_BPH_UNKNOWN;
+}
+
+static void update_audio_presence(struct output_panel *op)
+{
+	gint64 now = g_get_monotonic_time();
+	if(op->audio_meter_time && now - op->audio_meter_time < 500000)
+		return;
+	op->audio_meter_time = now;
+	op->audio_meter_level = 0.6f * op->audio_meter_level + 0.4f * get_audio_level();
+
+	if(!op->audio_meter_active) {
+		if(op->audio_meter_level >= 0.008f)
+			op->audio_meter_transition_count++;
+		else
+			op->audio_meter_transition_count = 0;
+		if(op->audio_meter_transition_count >= 2) {
+			op->audio_meter_active = 1;
+			op->audio_meter_transition_count = 0;
+		}
+	} else {
+		if(op->audio_meter_level <= 0.004f)
+			op->audio_meter_transition_count++;
+		else
+			op->audio_meter_transition_count = 0;
+		if(op->audio_meter_transition_count >= 3) {
+			op->audio_meter_active = 0;
+			op->audio_meter_transition_count = 0;
+		}
+	}
+}
+
+static double draw_input_status(cairo_t *c, double x, enum audio_input_status status)
+{
+	static const struct color status_colors[] = {
+		{.55, .55, .55},
+		{1, .72, .12},
+		{1, .31, .25},
+		{.15, .85, .35}
+	};
+	static const char *status_marks[] = {"0", "?", "!", ""};
+	set_color(c, status_colors[status], 1);
+	cairo_set_font_size(c, OUTPUT_WINDOW_HEIGHT * 0.28);
+	cairo_move_to(c, x, OUTPUT_WINDOW_HEIGHT * 0.76);
+	cairo_show_text(c, status_marks[status]);
+	return x + 24;
+}
+
 static void cairo_init(cairo_t *c)
 {
 	cairo_set_line_width(c,1);
@@ -234,7 +286,7 @@ static double print_number(cairo_t *c, double x, double y, char *s)
 #define RESULT_VALUE_ROW  0.72
 
 static void draw_results_table(cairo_t *c, double x0, double width, double height,
-		struct snapshot *snst, struct processing_buffers *p)
+		struct snapshot *snst, struct processing_buffers *p, int show_candidate_bph)
 {
 	static const char *titles[RESULT_COLUMNS] = {"RATE", "AMP.", "B.E.", "L.A.", "BEAT"};
 	char num[RESULT_COLUMNS][16];
@@ -267,7 +319,10 @@ static void draw_results_table(cairo_t *c, double x0, double width, double heigh
 	}
 	snprintf(num[3], sizeof(num[3]), "%.0f", snst->la); // whole degrees only
 	unit[3] = "\xC2\xB0";
-	snprintf(num[4], sizeof(num[4]), "%d", snst->guessed_bph);
+	if(show_candidate_bph && snst->candidate_bph && snst->bph && snst->is_old)
+		snprintf(num[4], sizeof(num[4]), "~%d", snst->candidate_bph);
+	else
+		snprintf(num[4], sizeof(num[4]), "%d", snst->guessed_bph);
 	unit[4] = "";
 
 	// One font size for all values, reduced when the window is too narrow
@@ -344,6 +399,31 @@ static gboolean output_draw_event(GtkWidget *widget, cairo_t *c, struct output_p
 	int height = gtk_widget_get_allocated_height(widget);
 
 	double x = draw_watch_icon(c,snst->signal,snst->calibrate ? snst->signal==NSTEPS : snst->signal, snst->is_light);
+	int show_audio_status = 0;
+	enum audio_input_status status = AUDIO_STATUS_UNAVAILABLE;
+	if(op->computer && !snst->calibrate) {
+		update_audio_presence(op);
+		status = op->audio_meter_active ? get_input_status(snst) : AUDIO_STATUS_NO_INPUT;
+		snst->audio_status = status;
+		show_audio_status = 1;
+	} else if(!op->computer && snst->audio_status >= AUDIO_STATUS_NO_INPUT &&
+		snst->audio_status <= AUDIO_STATUS_OK) {
+		status = snst->audio_status;
+		show_audio_status = 1;
+	}
+	if(show_audio_status) {
+		const char *message[] = {
+			"0: no audio input. The four squares by the clock show analysis windows with a valid period.",
+			"?: audio is present, but no beat rate has been recognized yet. The four squares show analysis windows with a valid period.",
+			"!: no valid rhythm at the selected beat rate. A free estimate, when available, is marked with ~ in the BEAT column. The four squares show analysis windows with a valid period.",
+			"Audio input and a valid beat period are detected. The four squares show analysis windows with a valid period."
+		};
+		x = draw_input_status(c, x + 3, status);
+		if(op->audio_status != status) {
+			gtk_widget_set_tooltip_text(widget, message[status]);
+			op->audio_status = status;
+		}
+	}
 
 	cairo_text_extents_t extents;
 
@@ -404,7 +484,8 @@ static gboolean output_draw_event(GtkWidget *widget, cairo_t *c, struct output_p
 				break;
 		}
 	} else {
-		draw_results_table(c, x + 10, width - x - 20, height, snst, p);
+		draw_results_table(c, x + 10, width - x - 20, height, snst, p,
+			snst->audio_status == AUDIO_STATUS_BPH_UNCONFIRMED);
 	}
 #ifdef DEBUG
 	{
@@ -1320,6 +1401,11 @@ struct output_panel *init_output_panel(struct computer *comp, struct snapshot *s
 	op->snst = snst;
 	op->guide_rate = 0;
 	op->guide_time = 0;
+	op->audio_meter_level = 0;
+	op->audio_meter_time = 0;
+	op->audio_meter_active = 0;
+	op->audio_meter_transition_count = 0;
+	op->audio_status = -1;
 
 	op->panel = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
 	gtk_container_set_border_width(GTK_CONTAINER(op->panel), border);

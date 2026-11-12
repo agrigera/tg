@@ -371,8 +371,10 @@ static int serialize_snapshot(FILE *f, struct snapshot *s, char *name)
 	SERIALIZE(int,events_wp);
 	SERIALIZE(int,amps_wp);
 	SERIALIZE(int,signal);
+	SERIALIZE(int,audio_status);
 	SERIALIZE(double,sample_rate);
 	SERIALIZE(int,guessed_bph);
+	SERIALIZE(int,candidate_bph);
 	SERIALIZE(double,rate);
 	SERIALIZE(double,be);
 	SERIALIZE(double,amp);
@@ -407,6 +409,7 @@ static int scan_snapshot(FILE *f, struct snapshot **s, char **name)
 
 	*s = malloc(sizeof(struct snapshot));
 	memset(*s, 0, sizeof(struct snapshot));
+	(*s)->audio_status = AUDIO_STATUS_UNAVAILABLE;
 	(*s)->pb = malloc(sizeof(struct processing_buffers));
 	memset((*s)->pb, 0, sizeof(struct processing_buffers));
 	*name = NULL;
@@ -476,8 +479,10 @@ static int scan_snapshot(FILE *f, struct snapshot **s, char **name)
 		SCAN(int,events_wp);
 		SCAN(int,amps_wp);
 		SCAN(int,signal);
+		SCAN(int,audio_status);
 		SCAN(double,sample_rate);
 		SCAN(int,guessed_bph);
+		SCAN(int,candidate_bph);
 		SCAN(double,rate);
 		SCAN(double,be);
 		SCAN(double,amp);
@@ -503,6 +508,10 @@ static int scan_snapshot(FILE *f, struct snapshot **s, char **name)
 	debug("serializer: checking events\n");
 	if((*s)->events_count && (*s)->events_wp >= (*s)->events_count) goto error;
 	if((*s)->signal > NSTEPS) (*s)->signal = NSTEPS;
+	if((*s)->audio_status < AUDIO_STATUS_UNAVAILABLE ||
+		(*s)->audio_status > AUDIO_STATUS_OK) goto error;
+	if((*s)->candidate_bph && ((*s)->candidate_bph < MIN_BPH ||
+		(*s)->candidate_bph > MAX_BPH)) goto error;
 	debug("serializer: checking events_tictoc\n");
 	if((*s)->events_tictoc && (*s)->events_count && !(*s)->events)
 		goto error;

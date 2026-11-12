@@ -369,20 +369,23 @@ static void handle_cal_change(GtkSpinButton *b, struct main_window *w)
 	gtk_widget_queue_draw(w->notebook);
 }
 
-static void handle_audio_change(GtkComboBox *b, struct main_window *w)
+/* The audio input is a button with the device name, cut to AUDIO_NAME_CHARS
+ * characters (its tooltip has the full name). Opening it lists every device in full. */
+#define AUDIO_NAME_CHARS 24
+
+static void audio_show(struct main_window *w, const char *name, int is_default)
 {
-	if(!w->controls_active) return;
-	const gchar *id = gtk_combo_box_get_active_id(b);
-	if(!id) return;
+	gtk_label_set_text(GTK_LABEL(w->audio_label), name);
+	gchar *tip = g_strconcat(name, is_default ? " (default device)" : "", NULL);
+	gtk_widget_set_tooltip_text(w->audio_combo_box, tip);
+	g_free(tip);
+}
 
-	char *end = NULL;
-	long device = strtol(id, &end, 10);
-	if(!end || *end)
-		return;
-	if((int)device == w->audio_device)
-		return;
-
-	w->audio_device = (int)device;
+/* Use a device: the same steps the old combo box took when its selection changed */
+static void audio_apply_device(struct main_window *w, int device)
+{
+	if(!w->controls_active || device == w->audio_device) return;
+	w->audio_device = device;
 	set_audio_input_device(w->audio_device);
 	w->restart_audio = 1;
 
@@ -390,6 +393,17 @@ static void handle_audio_change(GtkComboBox *b, struct main_window *w)
 	if(w->computer->recompute >= 0)
 		kill_computer(w);
 	unlock_computer(w->computer);
+}
+
+static void handle_audio_pick(GtkButton *item, struct main_window *w)
+{
+	GtkWidget *popover = gtk_widget_get_ancestor(GTK_WIDGET(item), GTK_TYPE_POPOVER);
+	if(popover) gtk_widget_hide(popover);
+
+	const char *name = g_object_get_data(G_OBJECT(item), "name");
+	int is_default = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(item), "default"));
+	audio_show(w, name, is_default);
+	audio_apply_device(w, GPOINTER_TO_INT(g_object_get_data(G_OBJECT(item), "device")));
 }
 
 static void handle_sample_rate_change(GtkComboBox *b, struct main_window *w)
@@ -865,6 +879,7 @@ static void handle_snapshot(GtkButton *b, struct main_window *w)
 	if(w->active_snapshot->calibrate) return;
 	struct snapshot *s = snapshot_clone(w->active_snapshot);
 	s->timestamp = get_timestamp(s->is_light);
+	s->audio_status = w->active_panel->audio_status;
 	s->position = w->live_position; // can still be changed on the snapshot tab
 	// Name the snapshot after the selected watch, if any ("Snapshot" otherwise)
 	add_new_tab(s, (char *)selected_watch(w), w);
@@ -1136,9 +1151,34 @@ static void load(GtkMenuItem *m, struct main_window *w)
 	gtk_widget_destroy(dialog);
 }
 
+/* The top bar is three bars (watch, audio, snapshot) in a flow box: side by side
+ * when the window is wide, wrapping to a second row when it is narrow. */
+static GtkWidget *make_bar(struct main_window *w)
+{
+	GtkWidget *bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+	gtk_container_set_border_width(GTK_CONTAINER(bar), 4);
+
+	gtk_container_add(GTK_CONTAINER(w->bar_flow), bar);
+	return bar;
+}
+
+/* Compact +/- buttons for the spin buttons of the top bar (class "compact"):
+ * the default ones are much taller and wider than the number they change */
+static void apply_compact_css(void)
+{
+	static const gchar css[] =
+		"spinbutton.compact button { min-width: 14px; min-height: 0px; padding: 0px 2px; }";
+	GtkCssProvider *provider = gtk_css_provider_new();
+	gtk_css_provider_load_from_data(provider, css, -1, NULL);
+	gtk_style_context_add_provider_for_screen(gdk_screen_get_default(),
+		GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+	g_object_unref(provider);
+}
+
 /* Set up the main window and populate with widgets */
 static void init_main_window(struct main_window *w)
 {
+	apply_compact_css();
 	w->window = gtk_application_window_new(w->app);
 
 	gtk_widget_set_size_request(w->window, 950, 700);
@@ -1153,28 +1193,40 @@ static void init_main_window(struct main_window *w)
 	GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
 	gtk_container_add(GTK_CONTAINER(w->window), vbox);
 
-	GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-	gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 0);
+	// Top strip: the bars on the left, the command menu on the right
+	GtkWidget *top_strip = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+	gtk_box_pack_start(GTK_BOX(vbox), top_strip, FALSE, FALSE, 0);
+
+	w->bar_flow = gtk_flow_box_new();
+	gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(w->bar_flow), GTK_SELECTION_NONE);
+	gtk_flow_box_set_homogeneous(GTK_FLOW_BOX(w->bar_flow), FALSE);
+	gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(w->bar_flow), 16);
+	gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(w->bar_flow), 6);
+	gtk_box_pack_start(GTK_BOX(top_strip), w->bar_flow, TRUE, TRUE, 0);
+
+	// Watch bar
+	GtkWidget *hbox = make_bar(w);
 
 	// Saved watch selector (populated once bph and lift angle widgets exist)
-	GtkWidget *label = gtk_label_new("watch");
-	gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
+	GtkWidget *label = NULL;
 	w->watch_combo_box = gtk_combo_box_text_new();
 	gtk_widget_set_tooltip_text(w->watch_combo_box, "Saved watches (bph and lift angle)");
 	gtk_box_pack_start(GTK_BOX(hbox), w->watch_combo_box, FALSE, FALSE, 0);
-	w->watch_save_button = gtk_button_new_with_label("Save");
+	w->watch_save_button = gtk_button_new_from_icon_name("document-save-symbolic", GTK_ICON_SIZE_BUTTON);
 	gtk_widget_set_tooltip_text(w->watch_save_button, "Save the current bph and lift angle as a watch");
 	gtk_box_pack_start(GTK_BOX(hbox), w->watch_save_button, FALSE, FALSE, 0);
-	w->watch_delete_button = gtk_button_new_with_label("Delete");
+	w->watch_delete_button = gtk_button_new_from_icon_name("edit-delete-symbolic", GTK_ICON_SIZE_BUTTON);
 	gtk_widget_set_tooltip_text(w->watch_delete_button, "Delete the selected watch");
 	gtk_box_pack_start(GTK_BOX(hbox), w->watch_delete_button, FALSE, FALSE, 0);
 
 	// BPH label
-	label = gtk_label_new("bph");
+	label = gtk_label_new("BEAT");
+	gtk_widget_set_tooltip_text(label, "Beats per hour (bph)");
 	gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
 
 	// BPH combo box
 	w->bph_combo_box = gtk_combo_box_text_new_with_entry();
+	gtk_entry_set_width_chars(GTK_ENTRY(gtk_bin_get_child(GTK_BIN(w->bph_combo_box))), 6);
 	gtk_box_pack_start(GTK_BOX(hbox), w->bph_combo_box, FALSE, FALSE, 0);
 	// Fill in pre-defined values
 	gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(w->bph_combo_box), "guess");
@@ -1196,11 +1248,14 @@ static void init_main_window(struct main_window *w)
 	g_signal_connect (w->bph_combo_box, "changed", G_CALLBACK(handle_bph_change), w);
 
 	// Lift angle label
-	label = gtk_label_new("lift angle");
+	label = gtk_label_new("L.A.");
+	gtk_widget_set_tooltip_text(label, "Lift angle (degrees)");
 	gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
 
 	// Lift angle spin button
 	w->la_spin_button = gtk_spin_button_new_with_range(MIN_LA, MAX_LA, 1);
+	gtk_entry_set_width_chars(GTK_ENTRY(w->la_spin_button), 3);
+	gtk_style_context_add_class(gtk_widget_get_style_context(w->la_spin_button), "compact");
 	gtk_box_pack_start(GTK_BOX(hbox), w->la_spin_button, FALSE, FALSE, 0);
 	gtk_spin_button_set_value(GTK_SPIN_BUTTON(w->la_spin_button), w->la);
 	g_signal_connect(w->la_spin_button, "value_changed", G_CALLBACK(handle_la_change), w);
@@ -1212,53 +1267,63 @@ static void init_main_window(struct main_window *w)
 	watch_populate(w, NULL);
 	watch_restore(w);
 
-	// Separator between watch settings and audio/computer settings
-	gtk_box_pack_start(GTK_BOX(hbox), gtk_separator_new(GTK_ORIENTATION_VERTICAL), FALSE, FALSE, 0);
+	// Audio bar
+	hbox = make_bar(w);
 
-	// Audio input label
-	label = gtk_label_new("audio");
-	gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
-
-	// Audio input combo box
-	w->audio_combo_box = gtk_combo_box_text_new();
+	// Audio input: a button with the device name; opening it lists every device in full
+	w->audio_combo_box = gtk_menu_button_new();
 	gtk_box_pack_start(GTK_BOX(hbox), w->audio_combo_box, FALSE, FALSE, 0);
+
+	w->audio_label = gtk_label_new("");
+	gtk_label_set_max_width_chars(GTK_LABEL(w->audio_label), AUDIO_NAME_CHARS);
+	gtk_label_set_ellipsize(GTK_LABEL(w->audio_label), PANGO_ELLIPSIZE_END);
+	GtkWidget *audio_button_content = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+	gtk_box_pack_start(GTK_BOX(audio_button_content), w->audio_label, FALSE, FALSE, 0);
+	gtk_box_pack_start(GTK_BOX(audio_button_content),
+		gtk_image_new_from_icon_name("pan-down-symbolic", GTK_ICON_SIZE_MENU), FALSE, FALSE, 0);
+	gtk_container_add(GTK_CONTAINER(w->audio_combo_box), audio_button_content);
+
+	GtkWidget *audio_list = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+	gtk_container_set_border_width(GTK_CONTAINER(audio_list), 6);
+	GtkWidget *audio_popover = gtk_popover_new(w->audio_combo_box);
+	gtk_container_add(GTK_CONTAINER(audio_popover), audio_list);
+	gtk_menu_button_set_popover(GTK_MENU_BUTTON(w->audio_combo_box), audio_popover);
+
 	int *audio_devices = NULL;
 	char **audio_names = NULL;
 	int audio_count = 0;
 	int default_audio_device = AUDIO_DEVICE_DEFAULT;
 	if(!list_audio_input_devices(&audio_devices, &audio_names, &audio_count, &default_audio_device)) {
+		int i, chosen = w->audio_device != AUDIO_DEVICE_DEFAULT ? w->audio_device : default_audio_device;
+		int found = 0;
+		for(i = 0; i < audio_count; i++)
+			if(audio_devices[i] == chosen) found = 1;
+		if(!found && audio_count > 0)
+			chosen = audio_devices[0];
+
 		for(i = 0; i < audio_count; i++) {
-			char id[32];
-			char display[256];
-			sprintf(id, "%d", audio_devices[i]);
-			if(audio_devices[i] == default_audio_device)
-				snprintf(display, sizeof(display), "%s (default)", audio_names[i]);
-			else
-				snprintf(display, sizeof(display), "%s", audio_names[i]);
-			gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(w->audio_combo_box), id, display);
-		}
+			int is_default = audio_devices[i] == default_audio_device;
+			gchar *full = g_strconcat(audio_names[i], is_default ? " (default)" : "", NULL);
+			GtkWidget *item = gtk_button_new_with_label(full);
+			g_free(full);
+			gtk_button_set_relief(GTK_BUTTON(item), GTK_RELIEF_NONE);
+			gtk_widget_set_halign(gtk_bin_get_child(GTK_BIN(item)), GTK_ALIGN_START);
+			g_object_set_data(G_OBJECT(item), "device", GINT_TO_POINTER(audio_devices[i]));
+			g_object_set_data(G_OBJECT(item), "default", GINT_TO_POINTER(is_default));
+			g_object_set_data_full(G_OBJECT(item), "name", g_strdup(audio_names[i]), g_free);
+			g_signal_connect(item, "clicked", G_CALLBACK(handle_audio_pick), w);
+			gtk_box_pack_start(GTK_BOX(audio_list), item, FALSE, FALSE, 0);
 
-		int selected = w->audio_device != AUDIO_DEVICE_DEFAULT ? w->audio_device : default_audio_device;
-		if(selected != AUDIO_DEVICE_DEFAULT) {
-			char id[32];
-			sprintf(id, "%d", selected);
-			if(!gtk_combo_box_set_active_id(GTK_COMBO_BOX(w->audio_combo_box), id) && audio_count > 0)
-				gtk_combo_box_set_active(GTK_COMBO_BOX(w->audio_combo_box), 0);
-		} else if(audio_count > 0) {
-			gtk_combo_box_set_active(GTK_COMBO_BOX(w->audio_combo_box), 0);
+			if(audio_devices[i] == chosen) {
+				w->audio_device = chosen;
+				audio_show(w, audio_names[i], is_default);
+			}
 		}
-
-		const gchar *active_id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(w->audio_combo_box));
-		if(active_id) {
-			char *end = NULL;
-			long device = strtol(active_id, &end, 10);
-			if(end && !*end)
-				w->audio_device = (int)device;
-		}
-
 		free_audio_input_devices(audio_devices, audio_names, audio_count);
 	}
-	g_signal_connect(w->audio_combo_box, "changed", G_CALLBACK(handle_audio_change), w);
+	if(audio_count == 0)
+		audio_show(w, "No audio device", 0);
+	gtk_widget_show_all(audio_list);
 
 	// Sample rate label
 	label = gtk_label_new("rate");
@@ -1289,22 +1354,17 @@ static void init_main_window(struct main_window *w)
 	gtk_box_pack_start(GTK_BOX(hbox), w->cal_spin_button, FALSE, FALSE, 0);
 	gtk_spin_button_set_value(GTK_SPIN_BUTTON(w->cal_spin_button), w->cal);
 	gtk_spin_button_set_numeric(GTK_SPIN_BUTTON(w->cal_spin_button), FALSE);
-	gtk_entry_set_width_chars(GTK_ENTRY(w->cal_spin_button), 6);
+	gtk_entry_set_width_chars(GTK_ENTRY(w->cal_spin_button), 5);
+	gtk_style_context_add_class(gtk_widget_get_style_context(w->cal_spin_button), "compact");
 	g_signal_connect(w->cal_spin_button, "value_changed", G_CALLBACK(handle_cal_change), w);
 	g_signal_connect(w->cal_spin_button, "output", G_CALLBACK(output_cal), NULL);
 	g_signal_connect(w->cal_spin_button, "input", G_CALLBACK(input_cal), NULL);
 
-	// Is there a more elegant way?
-	GtkWidget *empty = gtk_label_new("");
-	gtk_box_pack_start(GTK_BOX(hbox), empty, TRUE, FALSE, 0);
-
-	// Separator between audio/computer settings and the snapshot part
-	gtk_box_pack_start(GTK_BOX(hbox), gtk_separator_new(GTK_ORIENTATION_VERTICAL), FALSE, FALSE, 0);
+	// Snapshot bar
+	hbox = make_bar(w);
 
 	// Watch position: on the real-time tab it is used for the next snapshot,
 	// on a snapshot tab it edits that snapshot (shown in the tab title, saved with it)
-	GtkWidget *position_label = gtk_label_new("Position:");
-	gtk_box_pack_start(GTK_BOX(hbox), position_label, FALSE, FALSE, 0);
 	w->snapshot_position_combo = gtk_combo_box_text_new();
 	int pos;
 	for(pos = POS_NONE; pos < POS_COUNT; pos++)
@@ -1345,9 +1405,6 @@ static void init_main_window(struct main_window *w)
 	gtk_box_pack_start(GTK_BOX(hbox), w->snapshot_name, FALSE, FALSE, 0);
 	g_signal_connect(w->snapshot_name_entry, "changed", G_CALLBACK(handle_name_change), w);
 
-	empty = gtk_label_new("");
-	gtk_box_pack_start(GTK_BOX(hbox), empty, TRUE, FALSE, 0);
-
 	// Command menu
 	GtkWidget *command_menu = gtk_menu_new();
 	GtkWidget *command_menu_button = gtk_menu_button_new();
@@ -1360,7 +1417,7 @@ static void init_main_window(struct main_window *w)
 	g_object_set(G_OBJECT(command_menu_button), "direction", GTK_ARROW_DOWN, NULL);
 	g_object_set(G_OBJECT(command_menu), "halign", GTK_ALIGN_END, NULL);
 	gtk_menu_button_set_popup(GTK_MENU_BUTTON(command_menu_button), command_menu);
-	gtk_box_pack_end(GTK_BOX(hbox), command_menu_button, FALSE, FALSE, 0);
+	gtk_box_pack_end(GTK_BOX(top_strip), command_menu_button, FALSE, FALSE, 0);
 	
 	// ... Open
 	w->open_item = gtk_menu_item_new_with_label("Open");
